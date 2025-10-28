@@ -81,8 +81,10 @@ R1_list = []
 
 
 class CentralServer:
-    def __init__(self, use_reputation="C"):
+    def __init__(self, use_reputation="C", summary_path="final_experiment_summary.csv", ablation_config="R1,R2,R3,R4,R5"):
         self.use_reputation = use_reputation
+        self.summary_path = summary_path
+        self.ablation_config = ablation_config
         self.global_model = Net18(num_output_features).to(device)
         self.aggregated_global_model = None
         self.reputation = {}
@@ -349,11 +351,17 @@ class CentralServer:
                     f"Total time for aggregation: {total_aggregation_time:.4f} seconds"
                 )
 
+                # --- 动态生成并传入图片保存路径 ---
+                output_dir = os.path.dirname(self.summary_path)
+                accuracy_plot_path = os.path.join(output_dir, "accuracy_vs_epoch.png")
+                roc_plot_path = os.path.join(output_dir, "roc_curve.png")
+
                 plot_accuracy_vs_epoch(
                     self.aggregation_accuracies,
                     all_individual_accuracies,
                     self.num_aggregations,
                     learning_rate=0.02,
+                    save_path=accuracy_plot_path # 传入新的路径
                 )
                 final_accuracy, final_precision, final_recall, final_f1, final_auc = (
                     self.fed_evaluate(self.aggregated_global_model, data_test_device)
@@ -382,9 +390,9 @@ class CentralServer:
                     plt.legend(loc="lower right")
                     plt.grid(True, linestyle="--", alpha=0.5)
                     plt.tight_layout()
-                    plt.savefig("roc_curve.png", dpi=300)
+                    plt.savefig(roc_plot_path, dpi=300) # 使用新的路径
                     plt.close()
-                    print("✅ ROC curve saved as roc_curve.png")
+                    print(f"✅ ROC curve saved as {roc_plot_path}")
                 except Exception as e:
                     print(f"[WARN] ROC plotting failed: {e}")
                 # === 构造性能表（单行） ===
@@ -472,7 +480,7 @@ class CentralServer:
                         "RSS_KB": 2,  # 内存保留两位即可
                     }
                 )
-                csv_path = "final_experiment_summary.csv"
+                csv_path = self.summary_path
                 if os.path.exists(csv_path):
                     old = pd.read_csv(csv_path)
                     combined = pd.concat([old, df_final], ignore_index=True)
@@ -482,7 +490,7 @@ class CentralServer:
                 print("✅ Unified results saved to final_experiment_summary.csv")
 
                 print("Program is about to terminate")
-                sys.exit()
+                os._exit(0)
             self.new_model_event.clear()
 
     def update_reputation(self, drone_id, new_reputation):
@@ -684,16 +692,34 @@ class CentralServer:
         data_age,
         performance_threshold=0.67,
     ):
-        # **CHANGED: R1（参数一致性）不再二值化，改为平滑 Sigmoid 映射**
-        R1_raw = self.compute_r1_model_similarity(local_model, aggregated_global_model)
-        alpha_R1 = 10.0  # 陡峭度（可调）
-        R1_w = 1.0 / (1.0 + np.exp(-alpha_R1 * (R1_raw - 0.6)))
-        R1 = 0.1 + (0.99 - 0.1) * R1_w  # 缩放到 [0.1, 0.99]
+        # --- 1. 定义所有R因子的基础权重 ---
+        base_weights = {
+            "R1": 0.40,  # 参数一致性
+            "R2": 0.30,  # 性能
+            "R3": 0.10,  # 数据时效
+            "R4": 0.15,  # 更新方向
+            "R5": 0.05,  # 范数大小
+        }
 
-        # **CHANGED: R2（性能）仍用 sigmoid，但对“低性能”改为柔和衰减**
+        # --- 2. 根据消融配置，确定当前激活的R因子 ---
+        active_r_factors = set(self.ablation_config.split(','))
+        
+        # --- 3. 计算激活R因子的总权重，用于归一化 ---
+        total_active_weight = sum(base_weights[r] for r in active_r_factors if r in base_weights)
+        if total_active_weight == 0:
+            return 0.5 # 如果没有激活的因子，返回一个中性值
+
+        # --- 4. 动态计算每个R因子的值 ---
+
+        # R1: 参数一致性
+        R1_raw = self.compute_r1_model_similarity(local_model, aggregated_global_model)
+        alpha_R1 = 10.0
+        R1_w = 1.0 / (1.0 + np.exp(-alpha_R1 * (R1_raw - 0.6)))
+        R1 = 0.1 + (0.99 - 0.1) * R1_w
+
+        # R2: 性能
         R2 = sigmoid(performance)
         if performance_threshold is None:
-            # **NEW: 动态阈值（中位数），需要 perf_history 支持**
             if len(self.perf_history) >= 10:
                 perf_vals = [p for _, p in self.perf_history[-50:]]
                 performance_threshold = float(np.median(perf_vals))
@@ -703,56 +729,47 @@ class CentralServer:
         if performance < performance_threshold:
             cnt = self.low_performance_counts.get(drone_id, 0) + 1
             self.low_performance_counts[drone_id] = cnt
-            print("low performance node,", drone_id)
-            R2 *= 0.5**cnt  # 次数越多，衰减越强，但不是一次性砍死
+            R2 *= 0.5**cnt
         else:
             cnt = self.low_performance_counts.get(drone_id, 0)
             penalty_factor = 1.0 / (1.0 + 0.5 * cnt)
             self.low_performance_counts[drone_id] = max(0, cnt - 1)
-            print("use penalty factor")
             R2 *= penalty_factor
 
-        # **NEW: R4（更新方向相似度）+ R5（范数相对大小惩罚）**
+        # R3: 数据时效
+        R3 = exponential_decay(data_age)
+
+        # R4 & R5: 更新方向与范数
         try:
-            # 基于最近一次广播的模型，构造“更新向量”
-            ref_state = (
-                self.last_broadcast_state or aggregated_global_model.state_dict()
-            )
+            ref_state = self.last_broadcast_state or aggregated_global_model.state_dict()
             vec_ref0 = self._state_to_vec(ref_state)
             vec_loc = self._state_to_vec(local_model.state_dict())
             vec_agg = self._state_to_vec(aggregated_global_model.state_dict())
-
             u_local = vec_loc - vec_ref0
             u_ref = vec_agg - vec_ref0
-
-            # 方向一致性（余弦相似度 -> [0,1]）
             R4 = self._cos01(u_local, u_ref)
-
-            # 范数相对大小（>1 说明更离谱，指数惩罚）
             ratio = (u_local.norm().item() + 1e-8) / (u_ref.norm().item() + 1e-8)
-            beta = 1.0
-            R5 = float(
-                np.exp(-beta * max(0.0, ratio - 1.0))
-            )  # ratio<=1 ~1.0；超出逐步惩罚
+            R5 = float(np.exp(-1.0 * max(0.0, ratio - 1.0)))
         except Exception as e:
             print(f"[WARN] update-sim features failed: {e}")
             R4, R5 = 0.5, 1.0
+        
+        r_values = {"R1": R1, "R2": R2, "R3": R3, "R4": R4, "R5": R5}
 
-        # **原有的 R3（数据时效）**
-        R3 = exponential_decay(data_age)
+        # --- 5. 根据激活的R因子，计算加权声誉（权重已归一化） ---
+        rep_now = 0.0
+        for r_name, r_value in r_values.items():
+            if r_name in active_r_factors:
+                normalized_weight = base_weights[r_name] / total_active_weight
+                rep_now += normalized_weight * r_value
 
-        # **CHANGED: 调整权重，可扫参优化**
-        w_R1, w_R2, w_R3, w_R4, w_R5 = 0.40, 0.30, 0.10, 0.15, 0.05
-        rep_now = w_R1 * R1 + w_R2 * R2 + w_R3 * R3 + w_R4 * R4 + w_R5 * R5
-
-        # **NEW: EWMA 平滑声誉（对抗瞬时波动/作恶后短暂“洗白”）**
+        # --- 6. EWMA 平滑与极端惩罚 (保持不变) ---
         ema_alpha = 0.3
         rep_prev = self.reputation_ema.get(drone_id, rep_now)
         rep_ewma = (1 - ema_alpha) * rep_prev + ema_alpha * rep_now
         self.reputation_ema[drone_id] = rep_ewma
         reputation = rep_ewma
 
-        # **保留极端保护：连续低性能超 2 轮 -> 直接清零**
         if self.low_performance_counts.get(drone_id, 0) > 2:
             print(f"🛑 节点 {drone_id} 连续低性能超过 2 次，声誉设为 0")
             reputation = 0.0
@@ -856,9 +873,17 @@ if __name__ == "__main__":
     # 读取第一个参数 A/B/C，默认 C
     mode = sys.argv[1].upper() if len(sys.argv) > 1 else "C"
     if mode not in ("A", "B", "C", "D", "E", "F", "G", "H"):
-        print("Usage: python Central_Server.py [A|B|C|D|E|F|G|H]")
+        print("Usage: python Central_Server.py [A|B|C|D|E|F|G|H] [summary_csv_path] [ablation_config]")
         sys.exit(1)
 
+    # 读取第二个参数作为结果文件路径，提供默认值
+    summary_path = sys.argv[2] if len(sys.argv) > 2 else "final_experiment_summary.csv"
+
+    # 读取第三个参数作为消融实验配置，提供默认值（包含所有R因子）
+    ablation_config = sys.argv[3] if len(sys.argv) > 3 else "R1,R2,R3,R4,R5"
+
     # 根据 mode 传入不同的聚合算法
-    central_server = CentralServer(use_reputation=mode)
+    central_server = CentralServer(
+        use_reputation=mode, summary_path=summary_path, ablation_config=ablation_config
+    )
     central_server.run()

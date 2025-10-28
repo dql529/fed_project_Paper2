@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 import torch
+import matplotlib
 import numpy as np
 
 torch.manual_seed(0)
@@ -15,13 +16,14 @@ def exponential_decay(x, a=0.8):
 
 
 def plot_accuracy_vs_epoch(
-    accuracies, individual_accuracies, num_epochs, learning_rate
+    accuracies, individual_accuracies, num_epochs, learning_rate, save_path="plot.png"
 ):
     def to_percent(y, position):
         return f"{100*y:.2f}%"
 
     formatter = FuncFormatter(to_percent)
 
+    matplotlib.use("Agg")  # ✅ 不依赖图形界面，后台渲染
     plt.figure(figsize=(10, 6))
 
     # 确保 individual_accuracies 中的每个元素都是列表
@@ -90,4 +92,4 @@ def plot_accuracy_vs_epoch(
     )
 
     plt.tight_layout()
-    plt.savefig("plot.png", format="png")
+    plt.savefig(save_path, format="png")

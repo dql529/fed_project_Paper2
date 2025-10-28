@@ -342,6 +342,7 @@ if __name__ == "__main__":
     # 3) 再去注册，Server 此时能连接 /receive_model
     drone_node_instance.registerToMaster()
 
-    # 4) 防止主线程退出
-    while True:
-        time.sleep(10)
+    # 4) 10秒后自动结束进程
+    time.sleep(3)
+    print("--- Malicious Node timeout reached, exiting. ---")
+    os._exit(0)
