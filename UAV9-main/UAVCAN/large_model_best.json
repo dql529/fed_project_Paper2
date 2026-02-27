@@ -1,0 +1,9 @@
+{
+  "best_type": "xgboost",
+  "best_acc": 0.910227696901829,
+  "mlp_acc": 0.9056550951847704,
+  "xgb_acc": 0.910227696901829,
+  "mlp_path": "D:\\\u684c\u9762\\fed_project\\UAV9-main\\UAVCAN\\large_model.pt",
+  "xgb_path": "D:\\\u684c\u9762\\fed_project\\UAV9-main\\UAVCAN\\large_model_xgb.json",
+  "best_path": "D:\\\u684c\u9762\\fed_project\\UAV9-main\\UAVCAN\\large_model_xgb.json"
+}
