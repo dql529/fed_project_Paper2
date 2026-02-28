@@ -1,6 +1,4 @@
-"""
-plot_from_csv.py
-
+﻿"""
 Standalone plotting entrypoint.
 
 Usage (default paths):
@@ -15,7 +13,21 @@ from __future__ import annotations
 import argparse
 
 import dt_r4.config as C
-from dt_r4.plotting import make_plots_from_csv
+from dt_r4.plotting import make_plots_from_csv, parse_csv_list
+
+
+def _parse_float_list_csv(value: str | None):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text == "":
+        return None
+    vals = []
+    for x in text.split(","):
+        x = x.strip()
+        if x:
+            vals.append(float(x))
+    return vals if vals else None
 
 
 def main():
@@ -25,7 +37,36 @@ def main():
         "--summary", type=str, default="summary.csv", help="Path to summary.csv"
     )
     ap.add_argument("--out-dir", type=str, default=".", help="Output directory")
-
+    ap.add_argument(
+        "--tau",
+        type=float,
+        default=None,
+        help="Filter a single tau_gate value when plotting/summarizing",
+    )
+    ap.add_argument(
+        "--tau-sweep",
+        type=str,
+        default=None,
+        help="Comma list of tau_gate values for filtering",
+    )
+    ap.add_argument(
+        "--lam-m",
+        type=float,
+        default=None,
+        help="Filter adaptive-mimic lambda_m value",
+    )
+    ap.add_argument(
+        "--ref-size",
+        type=int,
+        default=None,
+        help="Filter reference subset size",
+    )
+    ap.add_argument(
+        "--audit-size",
+        type=int,
+        default=None,
+        help="Filter server audit subset size",
+    )
     ap.add_argument(
         "--attacks",
         type=str,
@@ -67,23 +108,28 @@ def main():
         type=str,
         default="polluted_f1",
         choices=["polluted_f1", "polluted_acc"],
-        help="FigA y-axis metric",
+        help="Y metric for clean_holdout-like plot",
     )
     args = ap.parse_args()
 
     attacks = (
-        [x.strip() for x in args.attacks.split(",") if x.strip()]
+        parse_csv_list(args.attacks)
         if args.attacks
         else None
     )
-    methods = [x.strip() for x in args.methods.split(",") if x.strip()]
+    methods = parse_csv_list(args.methods) or [
+        "weighted",
+        "mean",
+        "median",
+        "trimmed_mean",
+    ]
     mal_nodes = (
-        [int(x.strip()) for x in args.mal_nodes.split(",") if x.strip()]
+        [int(x) for x in parse_csv_list(args.mal_nodes) or []]
         if args.mal_nodes
         else None
     )
     dt_levels = (
-        [x.strip() for x in args.dt_levels.split(",") if x.strip()]
+        [x.strip() for x in parse_csv_list(args.dt_levels) or []]
         if args.dt_levels
         else None
     )
@@ -99,9 +145,13 @@ def main():
         label_flip_level=args.label_flip_level,
         num_nodes=args.num_nodes,
         metric=args.metric,
+        tau=args.tau,
+        tau_sweep=_parse_float_list_csv(args.tau_sweep),
+        lam_m=args.lam_m,
+        ref_size=args.ref_size,
+        audit_size=args.audit_size,
     )
 
 
 if __name__ == "__main__":
     main()
-

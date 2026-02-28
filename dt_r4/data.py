@@ -1,8 +1,7 @@
 """
 dt_r4/data.py
 
-数据加载、清洗、噪声构造、按 seed 划分节点数据等。
-"""
+æ°æ®å è½½ãæ¸æ´ãåªå£°æé ãæ seed ååèç¹æ°æ®ç­ã?"""
 
 from __future__ import annotations
 
@@ -27,8 +26,7 @@ from .models import TeacherNet
 
 
 # =========================
-# 3) 简单数据容器
-# =========================
+# 3) ç®åæ°æ®å®¹å?# =========================
 class SimpleData:
     def __init__(self, x: torch.Tensor, y: torch.Tensor):
         self.x = x
@@ -36,7 +34,7 @@ class SimpleData:
 
 
 # =========================
-# 5) 数据加载 + 噪声生成
+# 5) æ°æ®å è½½ + åªå£°çæ
 # =========================
 def load_and_clean_csv(csv_path: str) -> pd.DataFrame:
     if not os.path.exists(csv_path):
@@ -95,9 +93,7 @@ def apply_noise_to_df(df: pd.DataFrame, spec: dict) -> pd.DataFrame:
 
 def build_noise_variants_fixed(base_csv_path: str, dataset_seed: int = 123):
     """
-    只生成/返回 NOISE_VARIANTS 中声明的版本（当前即4个）。
-    dataset_seed 用于“固定噪声数据集”，避免不同seed下噪声CSV不同导致比较不干净。
-    """
+    åªçæ?è¿å NOISE_VARIANTS ä¸­å£°æççæ¬ï¼å½åå³4ä¸ªï¼ã?    dataset_seed ç¨äºâåºå®åªå£°æ°æ®éâï¼é¿åä¸åseedä¸åªå£°CSVä¸åå¯¼è´æ¯è¾ä¸å¹²åã?    """
     set_seeds(dataset_seed)
 
     base_df = load_and_clean_csv(base_csv_path)
@@ -141,6 +137,41 @@ def load_reference_data(csv_path: str):
     return ref_x, ref_y
 
 
+def sample_reference_subset(
+    ref_x: torch.Tensor, ref_y: torch.Tensor, n: int | None, seed: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Sample a reference subset for DT sensitivity.
+    If n is None/non-positive or larger than available, returns full tensors.
+    """
+    if n is None or int(n) <= 0:
+        return ref_x, ref_y
+
+    n_int = int(n)
+    n_total = int(ref_x.shape[0])
+    if n_int >= n_total:
+        return ref_x, ref_y
+    if n_int <= 0:
+        return ref_x[:0], ref_y[:0]
+
+    g = torch.Generator(device=ref_x.device)
+    g.manual_seed(int(seed))
+    perm = torch.randperm(n_total, generator=g, device=ref_x.device)
+    idx = perm[:n_int]
+    return ref_x[idx], ref_y[idx]
+
+
+def sample_audit_set(
+    ref_x: torch.Tensor, ref_y: torch.Tensor, n: int | None, seed: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Sample a labeled audit set used by R2. n=0 returns empty tensors (neutral R2).
+    """
+    if n is None or int(n) <= 0:
+        return ref_x[:0], ref_y[:0]
+    return sample_reference_subset(ref_x, ref_y, n, seed)
+
+
 def get_teacher_model():
     model = TeacherNet(num_output_features=2).to(device)
     if not os.path.exists(TEACHER_CKPT):
@@ -162,12 +193,8 @@ def load_node_splits(
     pre_split_poison: bool = False,
 ):
     """
-    每个 seed 会重新划分节点数据池（用于重复实验）。
-
-    如果 pre_split_poison 为 True 且节点属于恶意节点（i < malicious_nodes）并且
-    attack_mode == "label_flip"，则先对该节点的完整子集做标签翻转，再拆分
-    train / test；这样训练和测试集都会被同样的攻击污染。
-    """
+    æ¯ä¸ª seed ä¼éæ°ååèç¹æ°æ®æ± ï¼ç¨äºéå¤å®éªï¼ã?
+    å¦æ pre_split_poison ä¸?True ä¸èç¹å±äºæ¶æèç¹ï¼i < malicious_nodesï¼å¹¶ä¸?    attack_mode == "label_flip"ï¼ååå¯¹è¯¥èç¹çå®æ´å­éåæ ç­¾ç¿»è½¬ï¼åæå?    train / testï¼è¿æ ·è®­ç»åæµè¯éé½ä¼è¢«åæ ·çæ»å»æ±¡æã?    """
     df = load_and_clean_csv(csv_path)
 
     indices = np.arange(len(df))
@@ -215,3 +242,4 @@ def load_node_splits(
         )
 
     return node_data_objects, df
+

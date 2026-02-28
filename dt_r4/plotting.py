@@ -1,396 +1,387 @@
+﻿from __future__ import annotations
+
+"""Plotting utilities for r4 experiment outputs.
+
+This module intentionally keeps a small, dependency-light API used by:
+- r4_agg_minitest.py postprocessing scripts
+- plot_from_csv.py
+- paper_figs.py
 """
-dt_r4/plotting.py
 
-Plot helpers that work purely from CSV artifacts produced by r4_agg_minitest.py:
-  - runs.csv   : per (attack, dt_level, mal_nodes, method, seed) raw metrics
-  - summary.csv: grouped mean/std/count metrics
-
-This lets you re-generate figures without re-running training.
-"""
-
-from __future__ import annotations
-
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
+import pandas as pd
+
+import matplotlib.pyplot as plt
 
 
-@dataclass(frozen=True)
-class PlotSpec:
-    attacks: List[str]
-    methods: List[str]
-    mal_nodes: List[int]
-    dt_levels: List[str]
-    label_flip_level: str = "L1"
-    num_nodes: int = 10
+def load_summary_csv(path: str) -> pd.DataFrame:
+    return pd.read_csv(path)
 
 
-def _as_list_csv(s: Optional[str]) -> Optional[List[str]]:
-    if s is None:
+def load_rounds_csv(path: str) -> pd.DataFrame:
+    return pd.read_csv(path)
+
+
+def load_nodes_csv(path: str) -> pd.DataFrame:
+    return pd.read_csv(path)
+
+
+DT_LEVELS = {"D0", "D1", "D2"}
+SUMMARY_REQUIRED_COLUMNS = {
+    "seed",
+    "attack",
+    "method",
+    "dt_level",
+    "mal_nodes",
+}
+ROUNDS_REQUIRED_COLUMNS = {
+    "seed",
+    "round",
+    "attack",
+    "method",
+    "dt_level",
+    "mal_nodes",
+}
+NODES_REQUIRED_COLUMNS = {
+    "seed",
+    "node_id",
+    "is_malicious",
+    "R4",
+    "KL_q_p",
+    "Rep",
+    "passed_gate",
+    "pi",
+    "R2",
+    "R2_source",
+    "attack",
+    "dt_level",
+    "mal_nodes",
+    "method",
+}
+
+
+def parse_csv_list(value: str | None) -> Optional[List[str]]:
+    if value is None:
         return None
-    items = [x.strip() for x in str(s).split(",") if x.strip()]
-    return items or None
-
-
-def _as_list_int_csv(s: Optional[str]) -> Optional[List[int]]:
-    if s is None:
+    text = str(value).strip()
+    if text == "":
         return None
-    items = [int(x.strip()) for x in str(s).split(",") if x.strip()]
-    return items or None
+    out = [x.strip() for x in text.split(",") if x.strip()]
+    return out if out else None
 
 
-def load_runs_csv(path: str | Path):
-    import pandas as pd
-
-    df = pd.read_csv(path)
-    # Normalize types/empties for stable filtering.
-    for col in ("attack", "level", "dt_level", "method"):
-        if col in df.columns:
-            df[col] = df[col].fillna("").astype(str)
-    if "mal_nodes" in df.columns:
-        df["mal_nodes"] = df["mal_nodes"].astype(int)
-    if "seed" in df.columns:
-        df["seed"] = df["seed"].astype(int)
-    return df
+def _ensure_columns(df: pd.DataFrame, name: str, required: Sequence[str]) -> None:
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"{name} missing required columns: {', '.join(missing)}")
 
 
-def load_summary_csv(path: str | Path):
-    import pandas as pd
-
-    df = pd.read_csv(path)
-    for col in ("attack", "level", "dt_level", "method"):
-        if col in df.columns:
-            df[col] = df[col].fillna("").astype(str)
-    if "mal_nodes" in df.columns:
-        df["mal_nodes"] = df["mal_nodes"].astype(int)
-    if "count" in df.columns:
-        df["count"] = df["count"].astype(int)
-    return df
-
-
-def summarize_runs(runs_df, ddof: int = 0):
-    """
-    Build a summary DataFrame identical in schema to summary.csv.
-
-    Note: r4_agg_minitest.py uses numpy.std(ddof=0) by default; we keep that
-    default here for consistency.
-    """
-    import pandas as pd
-
-    group_cols = ["attack", "level", "dt_level", "mal_nodes", "method"]
-    metric_cols = ["polluted_acc", "polluted_f1", "clean_acc", "clean_f1", "w_mal"]
-
-    rows = []
-    for key, g in runs_df.groupby(group_cols, dropna=False):
-        row = dict(zip(group_cols, key))
-        row["count"] = int(len(g))
-
-        for base in metric_cols:
-            vals = g[base].dropna().to_numpy(dtype=float)
-            if vals.size == 0:
-                m = float("nan")
-                s = float("nan")
-            else:
-                m = float(np.mean(vals))
-                s = float(np.std(vals, ddof=ddof))
-            row[f"{base}_m"] = m
-            row[f"{base}_s"] = s
-
-        rows.append(row)
-
-    out = pd.DataFrame(rows)
-    # Match the exact column names used by the project summary.csv.
-    out = out.rename(
-        columns={
-            "polluted_acc_m": "polluted_acc_m",
-            "polluted_acc_s": "polluted_acc_s",
-            "polluted_f1_m": "polluted_f1_m",
-            "polluted_f1_s": "polluted_f1_s",
-            "clean_acc_m": "clean_acc_m",
-            "clean_acc_s": "clean_acc_s",
-            "clean_f1_m": "clean_f1_m",
-            "clean_f1_s": "clean_f1_s",
-            "w_mal_m": "w_mal_m",
-            "w_mal_s": "w_mal_s",
-        }
-    )
-    # Stable sort for readability / deterministic plots.
-    out = out.sort_values(group_cols).reset_index(drop=True)
+def _to_str_set(values: Iterable) -> set[str]:
+    out: set[str] = set()
+    for v in values:
+        sv = str(v).strip()
+        if sv:
+            out.add(sv)
     return out
 
 
-def _filter_attack_level(df, attack: str, label_flip_level: str):
-    if "level" not in df.columns:
-        return df
-    if attack == "label_flip":
-        return df[df["level"] == str(label_flip_level)]
-    # Non-label-flip attacks use an empty level key in our CSVs.
-    return df[(df["level"] == "") | df["level"].isna()]
+def _validate_filter_membership(
+    df: pd.DataFrame,
+    col: str,
+    values: Optional[Sequence],
+    name: str,
+    label: str,
+) -> None:
+    if values is None:
+        return
+    if df.empty:
+        raise ValueError(f"Cannot validate requested {label}: {name} data is empty")
+    if col not in df.columns:
+        raise ValueError(f"{name} missing required column '{col}' for {label} filter")
+    available = _to_str_set(df[col].dropna().tolist())
+    wanted = _to_str_set(values)
+    if not wanted:
+        return
+    missing = sorted(x for x in wanted if x not in available)
+    if missing:
+        raise ValueError(
+            f"Requested {label} not present in {name}: {', '.join(missing)}. "
+            f"Available: {', '.join(sorted(available))}"
+        )
 
 
-def plot_figA_polluted(
-    summary_df,
+def _validate_int_membership(
+    df: pd.DataFrame,
+    col: str,
+    values: Optional[Sequence[int]],
+    name: str,
+    label: str,
+) -> None:
+    if values is None:
+        return
+    if df.empty:
+        raise ValueError(f"Cannot validate requested {label}: {name} data is empty")
+    if col not in df.columns:
+        raise ValueError(f"{name} missing required column '{col}' for {label} filter")
+    raw = pd.to_numeric(df[col], errors="coerce").dropna().to_numpy(dtype=float)
+    available = set(int(x) for x in raw)
+    wanted = [int(v) for v in values]
+    missing = [str(v) for v in wanted if v not in available]
+    if missing:
+        raise ValueError(
+            f"Requested {label} not present in {name}: {', '.join(missing)}. "
+            f"Available: {', '.join(str(x) for x in sorted(available))}"
+        )
+
+
+def validate_plot_inputs(
     *,
-    spec: PlotSpec,
-    dt_level: str,
-    out_path: str | Path,
-    metric: str = "polluted_f1",
-):
-    """
-    Figure A: y=polluted metric (macro-F1 by default), x=malicious ratio,
-    facets by attack, curves by method, error bars from std.
-    """
-    import matplotlib.pyplot as plt
-
-    metric = str(metric).strip().lower()
-    if metric not in {"polluted_f1", "polluted_acc"}:
-        raise ValueError(f"Unsupported metric for FigA: {metric}")
-
-    m_col = f"{metric}_m"
-    s_col = f"{metric}_s"
-
-    df_dt = summary_df[summary_df["dt_level"] == str(dt_level)]
-
-    fig, axes = plt.subplots(
-        1, len(spec.attacks), figsize=(5 * len(spec.attacks), 4), sharey=True
-    )
-    if len(spec.attacks) == 1:
-        axes = [axes]
-
-    x = [mal / float(spec.num_nodes) for mal in spec.mal_nodes]
-
-    for ax, attack in zip(axes, spec.attacks):
-        df_a = df_dt[df_dt["attack"] == str(attack)]
-        df_a = _filter_attack_level(df_a, attack=str(attack), label_flip_level=spec.label_flip_level)
-
-        for method in spec.methods:
-            ys, yerr = [], []
-            df_m = df_a[df_a["method"] == str(method)]
-            for mal in spec.mal_nodes:
-                hit = df_m[df_m["mal_nodes"] == int(mal)]
-                if len(hit) == 0:
-                    ys.append(np.nan)
-                    yerr.append(np.nan)
-                else:
-                    ys.append(float(hit.iloc[0][m_col]))
-                    yerr.append(float(hit.iloc[0][s_col]))
-            ax.errorbar(x, ys, yerr=yerr, marker="o", capsize=3, label=method)
-
-        ax.set_title(f"{attack} (dt={dt_level})")
-        ax.set_xlabel("malicious ratio")
-        ax.grid(True, linestyle="--", alpha=0.4)
-
-    axes[0].set_ylabel("polluted macro-F1" if metric == "polluted_f1" else "polluted accuracy")
-
-    handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=len(spec.methods))
-    fig.tight_layout(rect=[0, 0, 1, 0.90])
-    fig.savefig(out_path)
-    plt.close(fig)
-
-
-def plot_figB_wmal(
-    summary_df,
-    *,
-    spec: PlotSpec,
-    dt_level: str,
-    out_path: str | Path,
-    method: str = "weighted",
-):
-    """
-    Figure B: y=W_mal_total (malicious weight mass) for the rep-based method.
-    """
-    import matplotlib.pyplot as plt
-
-    df_dt = summary_df[summary_df["dt_level"] == str(dt_level)]
-
-    fig, axes = plt.subplots(
-        1, len(spec.attacks), figsize=(5 * len(spec.attacks), 4), sharey=True
-    )
-    if len(spec.attacks) == 1:
-        axes = [axes]
-
-    x = [mal / float(spec.num_nodes) for mal in spec.mal_nodes]
-
-    for ax, attack in zip(axes, spec.attacks):
-        df_a = df_dt[df_dt["attack"] == str(attack)]
-        df_a = _filter_attack_level(df_a, attack=str(attack), label_flip_level=spec.label_flip_level)
-        df_m = df_a[df_a["method"] == str(method)]
-
-        ys, yerr = [], []
-        for mal in spec.mal_nodes:
-            hit = df_m[df_m["mal_nodes"] == int(mal)]
-            if len(hit) == 0:
-                ys.append(np.nan)
-                yerr.append(np.nan)
-            else:
-                ys.append(float(hit.iloc[0]["w_mal_m"]))
-                yerr.append(float(hit.iloc[0]["w_mal_s"]))
-
-        ax.errorbar(x, ys, yerr=yerr, marker="o", capsize=3, label=method)
-        ax.set_title(f"{attack} (dt={dt_level})")
-        ax.set_xlabel("malicious ratio")
-        ax.grid(True, linestyle="--", alpha=0.4)
-
-    axes[0].set_ylabel("W_mal_total")
-    handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=1)
-    fig.tight_layout(rect=[0, 0, 1, 0.90])
-    fig.savefig(out_path)
-    plt.close(fig)
-
-
-def make_plots_from_csv(
-    *,
-    runs_csv: str | Path = "runs.csv",
-    summary_csv: str | Path = "summary.csv",
-    out_dir: str | Path = ".",
+    summary_df: Optional[pd.DataFrame] = None,
+    rounds_df: Optional[pd.DataFrame] = None,
+    nodes_df: Optional[pd.DataFrame] = None,
+    runs_df: Optional[pd.DataFrame] = None,
     attacks: Optional[Sequence[str]] = None,
     methods: Optional[Sequence[str]] = None,
     mal_nodes: Optional[Sequence[int]] = None,
     dt_levels: Optional[Sequence[str]] = None,
-    label_flip_level: str = "L1",
-    num_nodes: int = 10,
-    metric: str = "polluted_f1",
-):
-    """
-    Load CSVs and generate:
-      - plotA_pollutedF1_dt{D0/D1/D2}.png (or pollutedAcc)
-      - plotB_wmal_dt{D0/D1/D2}.png
-    """
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+) -> None:
+    if summary_df is not None and not summary_df.empty:
+        _ensure_columns(summary_df, "summary.csv", SUMMARY_REQUIRED_COLUMNS)
+        _validate_filter_membership(summary_df, "attack", attacks, "summary.csv", "attacks")
+        _validate_filter_membership(summary_df, "method", methods, "summary.csv", "methods")
+        _validate_int_membership(summary_df, "mal_nodes", mal_nodes, "summary.csv", "mal_nodes")
+        if dt_levels is not None:
+            _validate_filter_membership(summary_df, "dt_level", dt_levels, "summary.csv", "dt levels")
+        bad_dt = {
+            str(x).strip()
+            for x in summary_df.get("dt_level", pd.Series(dtype=object)).dropna().tolist()
+            if str(x).strip() and str(x).strip() not in DT_LEVELS
+        }
+        if bad_dt:
+            raise ValueError(f"Invalid dt levels found in summary.csv: {', '.join(sorted(bad_dt))}")
 
-    runs_path = Path(runs_csv)
-    summary_path = Path(summary_csv)
+    if rounds_df is not None and not rounds_df.empty:
+        _ensure_columns(rounds_df, "rounds.csv", ROUNDS_REQUIRED_COLUMNS)
 
-    if summary_path.exists():
-        summary_df = load_summary_csv(summary_path)
-    else:
-        runs_df = load_runs_csv(runs_path)
-        summary_df = summarize_runs(runs_df, ddof=0)
-        summary_df.to_csv(summary_path, index=False)
+    if nodes_df is not None and not nodes_df.empty:
+        _ensure_columns(nodes_df, "nodes.csv", NODES_REQUIRED_COLUMNS)
 
-    # Defaults from data if not provided.
-    if attacks is None:
-        attacks = sorted({str(x) for x in summary_df["attack"].unique() if str(x)})
-    if methods is None:
-        methods = ["weighted", "mean", "median", "trimmed_mean"]
-    if mal_nodes is None:
-        mal_nodes = sorted({int(x) for x in summary_df["mal_nodes"].unique()})
-    if dt_levels is None:
-        dt_levels = sorted({str(x) for x in summary_df["dt_level"].unique() if str(x)})
+    if runs_df is not None and not runs_df.empty:
+        _validate_filter_membership(runs_df, "attack", attacks, "runs.csv", "attacks")
+        _validate_filter_membership(runs_df, "method", methods, "runs.csv", "methods")
+        _validate_int_membership(runs_df, "mal_nodes", mal_nodes, "runs.csv", "mal_nodes")
+        if dt_levels is not None:
+            _validate_filter_membership(runs_df, "dt_level", dt_levels, "runs.csv", "dt levels")
 
-    spec = PlotSpec(
-        attacks=list(attacks),
-        methods=list(methods),
-        mal_nodes=list(mal_nodes),
-        dt_levels=list(dt_levels),
-        label_flip_level=str(label_flip_level),
-        num_nodes=int(num_nodes),
-    )
 
-    for dt in spec.dt_levels:
-        metric_tag = "pollutedF1" if metric == "polluted_f1" else "pollutedAcc"
-        out_a = out_dir / f"plotA_{metric_tag}_dt{dt}.png"
-        plot_figA_polluted(summary_df, spec=spec, dt_level=dt, out_path=out_a, metric=metric)
+def _parse_csv_value_list(values: Optional[Sequence[str]]) -> Optional[List[str]]:
+    if values is None:
+        return None
+    out = [str(v).strip() for v in values if str(v).strip()]
+    return out if out else None
 
-        out_b = out_dir / f"plotB_wmal_dt{dt}.png"
-        plot_figB_wmal(summary_df, spec=spec, dt_level=dt, out_path=out_b)
+
+def _mean_ci95(series: pd.Series) -> Tuple[float, float, float]:
+    arr = pd.to_numeric(series, errors="coerce").dropna().to_numpy(dtype=float)
+    if arr.size == 0:
+        return float("nan"), float("nan"), 0
+    m = float(np.mean(arr))
+    s = float(np.std(arr, ddof=0))
+    n = int(arr.size)
+    ci = float(1.96 * s / np.sqrt(max(1, n))) if n > 0 else float("nan")
+    return m, ci, n
+
+
+def _metric_columns(df: pd.DataFrame, metric: str) -> Tuple[str, str, str]:
+    mean_col = f"{metric}_m"
+    std_col = f"{metric}_s"
+    if mean_col in df.columns:
+        return mean_col, std_col, "grouped"
+    if metric in df.columns:
+        return metric, None, "raw"
+    if metric == "benign_fp" and "benign_pass_rate" in df.columns:
+        return "benign_pass_rate", None, "raw"
+    return None, None, "missing"
+
+
+def _metric_series(df: pd.DataFrame, metric: str) -> pd.Series:
+    mean_col, _, mode = _metric_columns(df, metric)
+    if mode == "missing":
+        return pd.Series(dtype=float)
+    if mode == "grouped":
+        return pd.to_numeric(df[mean_col], errors="coerce")
+    return pd.to_numeric(df[mean_col], errors="coerce")
+
+
+def _choose_metric_column(df: pd.DataFrame, *names: str) -> str | None:
+    for col in names:
+        if col in df.columns:
+            return col
+    return None
+
+
+def _apply_filters(
+    df: pd.DataFrame,
+    *,
+    attacks: Optional[Sequence[str]] = None,
+    methods: Optional[Sequence[str]] = None,
+    mal_nodes: Optional[Sequence[int]] = None,
+    dt_levels: Optional[Sequence[str]] = None,
+    level: Optional[str] = None,
+    tau: Optional[float] = None,
+    tau_sweep: Optional[Sequence[float]] = None,
+    lam_m: Optional[float] = None,
+    ref_size: Optional[int] = None,
+    audit_size: Optional[int] = None,
+) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+
+    out = df.copy()
+
+    if attacks is not None:
+        out = out[out["attack"].isin(list(attacks))]
+    if methods is not None and "method" in out.columns:
+        out = out[out["method"].isin(list(methods))]
+    if mal_nodes is not None and "mal_nodes" in out.columns:
+        out = out[out["mal_nodes"].isin(list(mal_nodes))]
+    if dt_levels is not None and "dt_level" in out.columns:
+        out = out[out["dt_level"].isin(list(dt_levels))]
+    if level is not None and "level" in out.columns:
+        out = out[out["level"] == level]
+    if tau is not None and "tau_gate" in out.columns:
+        out = out[np.isclose(pd.to_numeric(out["tau_gate"], errors="coerce"), float(tau))]
+    if tau_sweep is not None and "tau_gate" in out.columns and len(list(tau_sweep)) > 0:
+        out = out[pd.to_numeric(out["tau_gate"], errors="coerce").isin(list(map(float, tau_sweep)))]
+    if lam_m is not None and "lambda_m" in out.columns:
+        out = out[np.isclose(pd.to_numeric(out["lambda_m"], errors="coerce"), float(lam_m))]
+    if ref_size is not None and "ref_size" in out.columns:
+        out = out[pd.to_numeric(out["ref_size"], errors="coerce") == int(ref_size)]
+    if audit_size is not None and "audit_size" in out.columns:
+        out = out[pd.to_numeric(out["audit_size"], errors="coerce") == int(audit_size)]
+
+    return out
+
+
+def _ensure_parent(path: str | Path) -> None:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+
+def _to_float_series(arr: Iterable) -> np.ndarray:
+    return np.asarray([float(x) for x in arr], dtype=float)
+
+
+def _group_ci95_from_group(g: pd.DataFrame, metric: str) -> Tuple[float, float]:
+    vals = pd.to_numeric(g[metric], errors="coerce").dropna().to_numpy(dtype=float)
+    if vals.size == 0:
+        return float("nan"), float("nan")
+    n = len(vals)
+    m = float(np.mean(vals))
+    ci = float(1.96 * np.std(vals, ddof=0) / np.sqrt(max(1, n)))
+    return m, ci
+
+
+def _ci_fill(ax, x, y, yerr, color, alpha=0.15):
+    x_arr = np.asarray(x, dtype=float)
+    lo = y - yerr
+    hi = y + yerr
+    valid = np.isfinite(x_arr) & np.isfinite(y) & np.isfinite(yerr)
+    if not np.any(valid):
+        return
+    ax.fill_between(x_arr[valid], lo[valid], hi[valid], color=color, alpha=alpha)
+
+
+def _count_from_group(sg: pd.DataFrame, fallback: int) -> int:
+    if "count" in sg.columns:
+        counts = pd.to_numeric(sg["count"], errors="coerce").dropna()
+        if len(counts) > 0:
+            return int(counts.iloc[0])
+    return int(fallback)
 
 
 def plot_clean_holdout_vs_f(
-    summary_df,
+    summary_df: pd.DataFrame,
     *,
     attacks: Sequence[str],
     methods: Sequence[str],
     dt_level: str,
-    mal_nodes: Sequence[int],
+    mal_nodes: Optional[Sequence[int]] = None,
     out_path: str | Path,
-    label_flip_level: str = "L1",
     metric: str = "clean_f1",
-):
-    """
-    Fig.1: Clean holdout performance vs f (malicious count).
+    label_flip_level: str = "L1",
+) -> Path:
+    _ensure_parent(out_path)
+    df = summary_df.copy()
+    if df.empty:
+        return Path(out_path)
+    df = df[df["dt_level"].astype(str) == str(dt_level)]
 
-    This uses `clean_f1_*` (macro-F1 on GLOBAL_REF_CSV) or `clean_acc_*` from summary.csv.
-    """
-    import matplotlib.pyplot as plt
+    if mal_nodes is None:
+        if "mal_nodes" in df.columns:
+            mal_nodes = sorted([int(x) for x in pd.unique(df["mal_nodes"]) if pd.notna(x)])
+        else:
+            mal_nodes = [0, 3, 5]
 
-    metric = str(metric).strip().lower()
-    if metric not in {"clean_f1", "clean_acc"}:
-        raise ValueError(f"Unsupported metric for clean holdout plot: {metric}")
+    mean_col, _, mode = _metric_columns(df, metric)
+    if mode == "missing":
+        raise ValueError(f"Metric '{metric}' not found in summary")
 
-    m_col = f"{metric}_m"
-    s_col = f"{metric}_s"
-
-    df_dt = summary_df[summary_df["dt_level"] == str(dt_level)]
-
-    fig, axes = plt.subplots(1, len(attacks), figsize=(5 * len(attacks), 4), sharey=True)
-    if len(attacks) == 1:
+    n_rows = len(attacks)
+    fig, axes = plt.subplots(1, n_rows, figsize=(5.2 * n_rows, 4), sharey=True)
+    if n_rows == 1:
         axes = [axes]
 
-    x = [int(f) for f in mal_nodes]
-
     for ax, attack in zip(axes, attacks):
-        df_a = df_dt[df_dt["attack"] == str(attack)]
-        df_a = _filter_attack_level(df_a, attack=str(attack), label_flip_level=str(label_flip_level))
-
         for method in methods:
-            ys, yerr = [], []
-            df_m = df_a[df_a["method"] == str(method)]
-            for f in x:
-                hit = df_m[df_m["mal_nodes"] == int(f)]
-                if len(hit) == 0:
-                    ys.append(np.nan)
-                    yerr.append(np.nan)
+            sub = df[(df["attack"] == attack) & (df["method"] == method)]
+            if attack == "label_flip":
+                sub = sub[sub.get("level", "") == label_flip_level]
+
+            y = []
+            yerr = []
+            x = []
+            for f in mal_nodes:
+                row = sub[sub["mal_nodes"] == f]
+                if row.empty:
+                    continue
+                # if summary has grouped mean/std, prefer grouped CI
+                if f"{metric}_m" in row.columns:
+                    m = float(pd.to_numeric(row[f"{metric}_m"].iloc[0], errors="coerce"))
+                    s = float(pd.to_numeric(row[f"{metric}_s"].iloc[0], errors="coerce") if f"{metric}_s" in row.columns else np.nan)
+                    n = int(row.get("count", pd.Series([1])).iloc[0]) if "count" in row.columns else 0
+                    ci = 1.96 * s / np.sqrt(max(1, n)) if np.isfinite(s) and n > 0 else 0.0
                 else:
-                    ys.append(float(hit.iloc[0][m_col]))
-                    yerr.append(float(hit.iloc[0][s_col]))
-            ax.errorbar(x, ys, yerr=yerr, marker="o", capsize=3, label=method)
+                    m, ci = _mean_ci95(row[mean_col])
+                if np.isfinite(m):
+                    x.append(int(f))
+                    y.append(m)
+                    yerr.append(ci if np.isfinite(ci) else 0.0)
 
-        ax.set_title(f"{attack} (dt={dt_level})")
-        ax.set_xlabel("f (malicious clients)")
-        ax.grid(True, linestyle="--", alpha=0.4)
+            if not x:
+                continue
+            c = ax.errorbar(x, y, yerr=yerr, marker="o", linewidth=1.5, capsize=3, label=str(method))
+            _ci_fill(ax, x, np.asarray(y), np.asarray(yerr), color=c[0].get_color())
 
-    axes[0].set_ylabel("Clean holdout macro-F1" if metric == "clean_f1" else "Clean holdout accuracy")
-    handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=len(methods))
-    fig.tight_layout(rect=[0, 0, 1, 0.90])
-    fig.savefig(out_path)
+        ax.set_xlabel("malicious clients")
+        ax.set_title(f"{attack}")
+        ax.grid(alpha=0.2)
+        ax.set_ylim(bottom=0.0, top=1.0)
+
+    axes[0].set_ylabel(metric.replace("_", " "))
+    for ax in axes:
+        ax.legend(fontsize=8)
+
+    fig.tight_layout()
+    plt.savefig(out_path, dpi=200)
     plt.close(fig)
-
-
-def load_rounds_csv(path: str | Path):
-    import pandas as pd
-
-    df = pd.read_csv(path)
-    for col in ("attack", "level", "dt_level", "method"):
-        if col in df.columns:
-            df[col] = df[col].fillna("").astype(str)
-    for col in ("mal_nodes", "seed", "round"):
-        if col in df.columns:
-            df[col] = df[col].astype(int)
-    return df
-
-
-def load_nodes_csv(path: str | Path):
-    import pandas as pd
-
-    df = pd.read_csv(path)
-    for col in ("attack", "level", "dt_level", "method"):
-        if col in df.columns:
-            df[col] = df[col].fillna("").astype(str)
-    for col in ("mal_nodes", "seed", "round", "node_id", "is_malicious"):
-        if col in df.columns:
-            df[col] = df[col].astype(int)
-    return df
+    return Path(out_path)
 
 
 def plot_wmal_vs_round(
-    rounds_df,
+    rounds_df: pd.DataFrame,
     *,
     dt_level: str,
     mal_nodes: int,
@@ -398,47 +389,47 @@ def plot_wmal_vs_round(
     out_path: str | Path,
     method: str = "weighted",
     label_flip_level: str = "L1",
-):
-    """
-    Fig.2: W_mal_total vs round (mean±std across seeds).
-    """
-    import matplotlib.pyplot as plt
+) -> Path:
+    _ensure_parent(out_path)
+    df = rounds_df.copy()
+    if df.empty:
+        return Path(out_path)
 
-    df = rounds_df[(rounds_df["dt_level"] == str(dt_level)) & (rounds_df["mal_nodes"] == int(mal_nodes))]
-    df = df[df["method"] == str(method)]
+    df = df[df["dt_level"].astype(str) == str(dt_level)]
+    df = df[df["mal_nodes"].astype(int) == int(mal_nodes)]
+    df = df[df["method"] == method]
 
-    fig, axes = plt.subplots(1, len(attacks), figsize=(5 * len(attacks), 4), sharey=True)
-    if len(attacks) == 1:
-        axes = [axes]
-
-    for ax, attack in zip(axes, attacks):
-        dfa = df[df["attack"] == str(attack)]
-        dfa = _filter_attack_level(dfa, attack=str(attack), label_flip_level=str(label_flip_level))
-
-        if len(dfa) == 0:
-            ax.set_title(f"{attack} (no data)")
-            ax.grid(True, linestyle="--", alpha=0.4)
+    fig, ax = plt.subplots(figsize=(7, 4))
+    for attack in attacks:
+        sub = df[df["attack"] == attack]
+        if attack == "label_flip" and "level" in sub.columns:
+            sub = sub[sub["level"] == label_flip_level]
+        if sub.empty:
             continue
+        by_round = sub.groupby("round")["w_mal"].agg(["mean", "std", "count"])
+        r = by_round.index.to_numpy()
+        m = by_round["mean"].to_numpy(dtype=float)
+        c = by_round["count"].to_numpy(dtype=int)
+        s = by_round["std"].to_numpy(dtype=float)
+        ci = 1.96 * np.divide(s, np.sqrt(c), out=np.zeros_like(s), where=c > 0)
 
-        g = dfa.groupby("round")["w_mal"]
-        x = g.mean().index.to_numpy(dtype=int)
-        y = g.mean().to_numpy(dtype=float)
-        ystd = g.std(ddof=0).to_numpy(dtype=float)
+        line = ax.plot(r, m, marker="o", linewidth=1.4, label=attack)
+        _ci_fill(ax, r, m, ci, color=line[0].get_color())
 
-        ax.plot(x, y, marker="o", label="mean")
-        ax.fill_between(x, y - ystd, y + ystd, alpha=0.2, label="±std")
-        ax.set_title(f"{attack} (dt={dt_level}, f={mal_nodes})")
-        ax.set_xlabel("round")
-        ax.grid(True, linestyle="--", alpha=0.4)
-
-    axes[0].set_ylabel("W_mal_total")
+    ax.set_title(f"W_mal vs round (f={mal_nodes}, dt={dt_level}, {method})")
+    ax.set_xlabel("Round")
+    ax.set_ylabel("W_mal")
+    ax.set_ylim(0, 1)
+    ax.grid(alpha=0.2)
+    ax.legend()
     fig.tight_layout()
-    fig.savefig(out_path)
+    plt.savefig(out_path, dpi=200)
     plt.close(fig)
+    return Path(out_path)
 
 
 def plot_r4_distribution(
-    nodes_df,
+    nodes_df: pd.DataFrame,
     *,
     attack: str,
     dt_level: str,
@@ -446,277 +437,961 @@ def plot_r4_distribution(
     out_path: str | Path,
     method: str = "weighted",
     label_flip_level: str = "L1",
-):
-    """
-    Fig.3: R4 (and divergence) distribution for benign vs malicious.
+    r4_col: str = "R4",
+) -> Path:
+    _ensure_parent(out_path)
+    df = nodes_df.copy()
+    if df.empty:
+        return Path(out_path)
+    df = df[df["attack"] == attack]
+    df = df[df["dt_level"].astype(str) == str(dt_level)]
+    df = df[df["mal_nodes"].astype(int) == int(mal_nodes)]
+    df = df[df["method"].astype(str) == str(method)]
+    if attack == "label_flip" and "level" in df.columns:
+        df = df[df["level"] == label_flip_level]
 
-    Note on "n_b/n_m":
-    - Each point is one client score for one seed and one round present in nodes.csv.
-      (In our default minitest runs, nodes.csv logs only the last round, so points
-      are client-level scores at that final round pooled across seeds.)
-    """
-    import matplotlib.pyplot as plt
-    import dt_r4.config as C
+    if r4_col not in df.columns:
+        raise ValueError(f"Column '{r4_col}' not in nodes csv")
 
-    df = nodes_df[
-        (nodes_df["attack"] == str(attack))
-        & (nodes_df["dt_level"] == str(dt_level))
-        & (nodes_df["mal_nodes"] == int(mal_nodes))
-        & (nodes_df["method"] == str(method))
-    ]
-    df = _filter_attack_level(df, attack=str(attack), label_flip_level=str(label_flip_level))
+    benign = pd.to_numeric(df.loc[df["is_malicious"] == 0, r4_col], errors="coerce").dropna().to_numpy()
+    malicious = pd.to_numeric(df.loc[df["is_malicious"] == 1, r4_col], errors="coerce").dropna().to_numpy()
 
-    benign = df[df["is_malicious"] == 0]
-    malicious = df[df["is_malicious"] == 1]
+    fig, ax = plt.subplots(figsize=(6, 4))
+    data = [benign, malicious]
+    labels = ["benign", "malicious"]
+    bp = ax.boxplot(data, labels=labels, patch_artist=True)
+    for patch, color in zip(bp["boxes"], ["#4c72b0", "#dd8452"]):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.65)
 
-    r4_b = benign["R4"].dropna().to_numpy(dtype=float)
-    r4_m = malicious["R4"].dropna().to_numpy(dtype=float)
-    kl_b = benign["r4_kl"].dropna().to_numpy(dtype=float)
-    kl_m = malicious["r4_kl"].dropna().to_numpy(dtype=float)
-
-    if r4_b.size == 0 or r4_m.size == 0:
-        raise ValueError(
-            "Fig.3 requires both benign and malicious samples. "
-            f"Got n_benign={r4_b.size}, n_malicious={r4_m.size} after filtering "
-            f"(attack={attack}, dt={dt_level}, f={mal_nodes}, method={method})."
-        )
-
-    # Prefer the tau logged in nodes.csv if present/consistent; otherwise fall back to config.
-    tau = float(getattr(C, "R4_GATE_TAU", 0.5))
-    if "tau_gate" in df.columns:
-        uniq = df["tau_gate"].dropna().unique()
-        if len(uniq) == 1:
-            tau = float(uniq[0])
-
-    pass_b = float(np.mean(r4_b >= tau)) if r4_b.size else float("nan")
-    pass_m = float(np.mean(r4_m >= tau)) if r4_m.size else float("nan")
-
-    seeds = sorted({int(s) for s in df["seed"].unique()}) if "seed" in df.columns else []
-    rounds = sorted({int(x) for x in df["round"].unique()}) if "round" in df.columns else []
-    round_str = f"round={rounds[0]}" if len(rounds) == 1 else f"rounds={len(rounds)}"
-    seed_str = f"seeds={len(seeds)}" if seeds else ""
-    unit_str = ", ".join([x for x in [seed_str, round_str] if x])
-
-    def _violin(ax, data, labels, ylabel: str, title: str, *, colors: List[str]):
-        pos = list(range(1, len(data) + 1))
-        parts = ax.violinplot(
-            data, positions=pos, showmeans=False, showmedians=True, showextrema=False
-        )
-        for i, body in enumerate(parts.get("bodies", [])):
-            c = colors[i] if i < len(colors) else "#4C72B0"
-            body.set_facecolor(c)
-            body.set_edgecolor(c)
-            body.set_alpha(0.25)
-
-        # jittered points
-        rng = np.random.default_rng(0)
-        for i, vals in enumerate(data, start=1):
-            if len(vals) == 0:
-                continue
-            x = rng.normal(i, 0.06, size=len(vals))
-            ax.scatter(x, vals, s=10, alpha=0.35, color=colors[i - 1])
-
-        ax.set_xticks(pos)
-        ax.set_xticklabels(labels)
-        ax.set_ylabel(ylabel)
-        ax.set_title(title)
-        ax.grid(True, linestyle="--", alpha=0.35)
-
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
-    _violin(
-        axes[0],
-        [r4_b, r4_m],
-        labels=["benign", "malicious"],
-        ylabel="R4 score (higher is better)",
-        title=f"R4 separation ({attack}, dt={dt_level}, f={mal_nodes})",
-        colors=["#4C72B0", "#DD8452"],
-    )
-    axes[0].axhline(tau, linestyle="--", color="black", linewidth=1.0, alpha=0.7)
-    # Keep the figure clean (paper style): only the threshold line + short label.
-    axes[0].text(
-        0.98,
-        tau,
-        rf"$\tau_{{gate}}={tau:.2f}$",
-        transform=axes[0].get_yaxis_transform(),
-        va="bottom",
-        ha="right",
-        fontsize=10,
-        color="black",
-    )
-
-    _violin(
-        axes[1],
-        [kl_b, kl_m],
-        labels=["benign", "malicious"],
-        ylabel="KL(p_twin || p_i) (lower is better)",
-        title=f"KL(p_twin || p_i) ({attack}, dt={dt_level}, f={mal_nodes})",
-        colors=["#4C72B0", "#DD8452"],
-    )
-
-    # Tighten y-lims to the informative range (with a small margin), without clipping points.
-    def _tight_ylim(ax, vals: np.ndarray, *, pad_frac: float = 0.08):
-        if vals.size == 0:
-            return
-        lo = float(np.nanmin(vals))
-        hi = float(np.nanmax(vals))
-        if not np.isfinite(lo) or not np.isfinite(hi):
-            return
-        span = max(1e-12, hi - lo)
-        pad = pad_frac * span
-        ax.set_ylim(lo - pad, hi + pad)
-
-    _tight_ylim(axes[0], np.concatenate([r4_b, r4_m]))
-    _tight_ylim(axes[1], np.concatenate([kl_b, kl_m]))
+    ax.set_title(f"R4 distribution @ dt={dt_level}, f={mal_nodes}, {attack}")
+    ax.set_ylim(0, 1)
+    ax.set_ylabel("R4")
+    ax.grid(alpha=0.2, axis="y")
 
     fig.tight_layout()
-    fig.savefig(out_path)
+    plt.savefig(out_path, dpi=200)
     plt.close(fig)
-
-    # Write a companion caption file with the "statistical unit" and gate pass rates.
-    out_path = Path(out_path)
-    cap_path = out_path.with_suffix("")  # drop .png
-    cap_path = cap_path.parent / (cap_path.name + "_caption.txt")
-
-    # Decide what "one point" means based on how many rounds are present in the filtered df.
-    if len(rounds) == 1:
-        unit_desc = (
-            f"Each dot is one client-level score at the final round (r={rounds[0]}), "
-            f"pooled across {len(seeds)} seeds."
-        )
-    else:
-        unit_desc = (
-            "Each dot is one client-level score computed per round, pooled across "
-            f"{len(seeds)} seeds and {len(rounds)} rounds."
-        )
-
-    caption_plain = (
-        f"Fig. 3. Separation of semantic consistency between benign and malicious clients under "
-        f"attack={attack} at f={mal_nodes} and DT fidelity {dt_level}. "
-        f"Left: R4 scores (higher is better) with semantic gate threshold tau_gate={tau:.2f}. "
-        f"Right: KL divergence KL(p_twin || p_i) on the server reference set (lower is better). "
-        f"{unit_desc} n_benign={r4_b.size}, n_malicious={r4_m.size}. "
-        f"Gate pass rate P(R4>=tau_gate)={pass_b:.2f} (benign) vs {pass_m:.2f} (malicious)."
-    )
-
-    with open(cap_path, "w", encoding="utf-8") as f:
-        f.write(caption_plain + "\n")
-
-
-def plot_ablation_dt_logit_scale(
-    summary_df,
-    *,
-    dt_level: str,
-    out_path: str | Path,
-    mal_nodes: Sequence[int] = (0, 3, 5),
-    attack: str = "dt_logit_scale",
-    methods: Sequence[str] = ("weighted_full", "weighted_r4only", "weighted_r2only", "weighted_nogate"),
-    metric: str = "polluted_f1",
-):
-    """
-    Fig.4: Ablation curves under dt_logit_scale (F1 vs f).
-    """
-    import matplotlib.pyplot as plt
-
-    metric = str(metric).strip().lower()
-    if metric not in {"polluted_f1", "polluted_acc"}:
-        raise ValueError(f"Unsupported metric for ablation plot: {metric}")
-
-    m_col = f"{metric}_m"
-    s_col = f"{metric}_s"
-
-    df = summary_df[(summary_df["attack"] == str(attack)) & (summary_df["dt_level"] == str(dt_level))]
-
-    fig, ax = plt.subplots(1, 1, figsize=(6, 4))
-    x = [int(f) for f in mal_nodes]
-    for m in methods:
-        df_m = df[df["method"] == str(m)]
-        ys, yerr = [], []
-        for f in x:
-            hit = df_m[df_m["mal_nodes"] == int(f)]
-            if len(hit) == 0:
-                ys.append(np.nan)
-                yerr.append(np.nan)
-            else:
-                ys.append(float(hit.iloc[0][m_col]))
-                yerr.append(float(hit.iloc[0][s_col]))
-        ax.errorbar(x, ys, yerr=yerr, marker="o", capsize=3, label=m)
-
-    ax.set_title(f"Ablation under {attack} (dt={dt_level})")
-    ax.set_xlabel("f (malicious clients)")
-    ax.set_ylabel("polluted macro-F1" if metric == "polluted_f1" else "polluted accuracy")
-    ax.grid(True, linestyle="--", alpha=0.4)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(out_path)
-    plt.close(fig)
+    return Path(out_path)
 
 
 def plot_ablation_multiattack(
-    summary_df,
+    summary_df: pd.DataFrame,
     *,
     dt_level: str,
     attacks: Sequence[str],
     out_path: str | Path,
-    mal_nodes: Sequence[int] = (0, 3, 5),
-    methods: Sequence[str] = (
-        "weighted_full",
-        "weighted_r4only",
-        "weighted_r2only",
-        "weighted_nogate",
-    ),
+    mal_nodes: Sequence[int],
     metric: str = "polluted_f1",
-    label_flip_level: str = "L1",
-):
-    """
-    Fig.4 (extended): ablation curves under multiple attacks.
+) -> Path:
+    _ensure_parent(out_path)
+    df = summary_df.copy()
+    if df.empty:
+        return Path(out_path)
 
-    Each subplot is one attack; y is polluted macro-F1 (or polluted acc).
-    """
-    import matplotlib.pyplot as plt
-
-    metric = str(metric).strip().lower()
-    if metric not in {"polluted_f1", "polluted_acc"}:
-        raise ValueError(f"Unsupported metric for ablation plot: {metric}")
-
-    m_col = f"{metric}_m"
-    s_col = f"{metric}_s"
-
-    df_dt = summary_df[summary_df["dt_level"] == str(dt_level)]
-
-    fig, axes = plt.subplots(
-        1, len(attacks), figsize=(5 * len(attacks), 4), sharey=True
-    )
+    df = df[df["dt_level"].astype(str) == str(dt_level)]
+    fig, axes = plt.subplots(1, len(attacks), figsize=(6 * len(attacks), 4), sharey=True)
     if len(attacks) == 1:
         axes = [axes]
 
-    x = [int(f) for f in mal_nodes]
-
     for ax, attack in zip(axes, attacks):
-        df_a = df_dt[df_dt["attack"] == str(attack)]
-        df_a = _filter_attack_level(
-            df_a, attack=str(attack), label_flip_level=str(label_flip_level)
+        sub = df[df["attack"] == attack]
+        methods = [x for x in pd.unique(sub["method"]) if pd.notna(x)]
+        if not len(methods):
+            continue
+
+        for f in mal_nodes:
+            sf = sub[sub["mal_nodes"] == int(f)]
+            means = []
+            cis = []
+            x = []
+            for m in methods:
+                row = sf[sf["method"] == m]
+                if row.empty:
+                    continue
+                if f"{metric}_m" in row.columns:
+                    mean = float(pd.to_numeric(row[f"{metric}_m"].iloc[0], errors="coerce"))
+                    std = float(pd.to_numeric(row[f"{metric}_s"].iloc[0], errors="coerce") if f"{metric}_s" in row.columns else np.nan)
+                    count = int(row.get("count", pd.Series([1])).iloc[0]) if "count" in row.columns else 0
+                    ci = 1.96 * std / np.sqrt(max(1, count)) if np.isfinite(std) and count > 0 else 0.0
+                else:
+                    mean, ci = _mean_ci95(row[metric]) if metric in row.columns else (float("nan"), float("nan"))
+                if np.isfinite(mean):
+                    x.append(str(m))
+                    means.append(mean)
+                    cis.append(ci if np.isfinite(ci) else 0.0)
+            if not x:
+                continue
+            line = ax.errorbar(
+                np.arange(len(x)),
+                means,
+                yerr=cis,
+                marker="o",
+                capsize=3,
+                label=f"f={f}",
+                linewidth=1.3,
+            )
+            _ci_fill(ax, np.arange(len(x)), np.asarray(means), np.asarray(cis), color=line[0].get_color())
+            ax.set_xticks(np.arange(len(x)))
+            ax.set_xticklabels(x, rotation=20)
+
+        ax.set_title(f"{attack}")
+        ax.set_ylim(0, 1)
+        ax.set_xlabel("Method")
+        ax.grid(alpha=0.2)
+        if attack == attacks[0]:
+            ax.set_ylabel(metric.replace("_", " "))
+        ax.legend()
+
+    fig.tight_layout()
+    plt.savefig(out_path, dpi=200)
+    plt.close(fig)
+    return Path(out_path)
+
+def plot_sdt_vs_round(
+    rounds_df: pd.DataFrame,
+    *,
+    dt_level: str,
+    mal_nodes: int = 5,
+    attacks: Optional[Sequence[str]] = None,
+    out_path: str | Path = "plot_sdt_vs_round.png",
+    methods: Optional[Sequence[str]] = None,
+    label_flip_level: str = "L1",
+) -> Path:
+    _ensure_parent(out_path)
+    df = rounds_df.copy()
+    if df.empty:
+        return Path(out_path)
+    if "S_DT" not in df.columns:
+        return Path(out_path)
+
+    df = df[df["dt_level"].astype(str) == str(dt_level)]
+    df = df[df["mal_nodes"].astype(int) == int(mal_nodes)]
+    if methods is not None:
+        df = df[df["method"].isin(list(methods))]
+
+    if attacks is None:
+        attacks = sorted(pd.unique(df["attack"]).tolist())
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    for attack in attacks:
+        sub = df[df["attack"] == attack].copy()
+        if attack == "label_flip" and "level" in sub.columns:
+            sub = sub[sub["level"] == label_flip_level]
+        if sub.empty:
+            continue
+
+        by_round = sub.groupby("round")["S_DT"].agg(["mean", "std", "count"])
+        r = by_round.index.to_numpy()
+        m = by_round["mean"].to_numpy(dtype=float)
+        s = by_round["std"].to_numpy(dtype=float)
+        c = by_round["count"].to_numpy(dtype=int)
+        ci = 1.96 * np.divide(s, np.sqrt(c), out=np.zeros_like(s), where=c > 0)
+
+        line = ax.plot(r, m, marker="o", linewidth=1.4, label=attack)
+        _ci_fill(ax, r, m, ci, color=line[0].get_color())
+
+    ax.set_xlabel("Round")
+    ax.set_ylabel("S_DT")
+    ax.set_title(f"S_DT vs round (f={mal_nodes}, dt={dt_level})")
+    ax.grid(alpha=0.2)
+    ax.legend()
+    fig.tight_layout()
+    plt.savefig(out_path, dpi=200)
+    plt.close(fig)
+    return Path(out_path)
+
+
+def plot_fallback_prob_table(
+    df: pd.DataFrame,
+    *,
+    attacks: Optional[Sequence[str]] = None,
+    dt_levels: Optional[Sequence[str]] = None,
+    mal_nodes: Optional[Sequence[int]] = None,
+    methods: Optional[Sequence[str]] = None,
+    out_path: str | Path = "fallback_prob_table.csv",
+) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame()
+
+    if "fallback_rate" in df.columns:
+        g = _apply_filters(df, attacks=attacks, methods=methods, mal_nodes=mal_nodes, dt_levels=dt_levels)
+        metric = "fallback_rate"
+    elif "fallback_rate_m" in df.columns:
+        g = _apply_filters(df, attacks=attacks, methods=methods, mal_nodes=mal_nodes, dt_levels=dt_levels)
+        metric = "fallback_rate_m"
+    elif "fallback_flag" in df.columns:
+        g = _apply_filters(df, attacks=attacks, methods=methods, mal_nodes=mal_nodes, dt_levels=dt_levels)
+        metric = "fallback_flag"
+    else:
+        return pd.DataFrame()
+
+    if g.empty:
+        return pd.DataFrame()
+
+    group_cols = ["attack", "dt_level", "mal_nodes"]
+    if "method" in g.columns and g["method"].nunique() > 1:
+        group_cols.append("method")
+    if "lambda_m" in g.columns and g["lambda_m"].nunique() > 1:
+        group_cols.append("lambda_m")
+    if "ref_size" in g.columns and g["ref_size"].nunique() > 1:
+        group_cols.append("ref_size")
+    if "audit_size" in g.columns and g["audit_size"].nunique() > 1:
+        group_cols.append("audit_size")
+    if "tau_gate" in g.columns and g["tau_gate"].nunique() > 1:
+        group_cols.append("tau_gate")
+
+    rows = []
+    for key, sub in g.groupby(group_cols, dropna=False):
+        probs = pd.to_numeric(sub[metric], errors="coerce").to_numpy(dtype=float)
+        probs = probs[np.isfinite(probs)]
+        if probs.size == 0:
+            continue
+        row = {c: v for c, v in zip(group_cols, key if isinstance(key, tuple) else (key,))}
+        m = float(np.mean(probs))
+        s = float(np.std(probs, ddof=0))
+        n = int(len(probs))
+        row["fallback_prob"] = m
+        row["fallback_prob_std"] = s
+        row["fallback_prob_ci95"] = 1.96 * s / np.sqrt(max(1, n))
+        row["count"] = n
+        rows.append(row)
+
+    out = pd.DataFrame(rows).sort_values(group_cols).reset_index(drop=True)
+    if str(Path(out_path).suffix).lower() == ".csv":
+        out.to_csv(out_path, index=False)
+    else:
+        # fallback: dump a readable table to txt/csv-like output
+        out.to_csv(out_path, index=False)
+    return out
+
+
+def plot_cleanf1_vs_tau(
+    summary_df: pd.DataFrame,
+    *,
+    out_path: str | Path,
+    attacks: Optional[Sequence[str]] = None,
+    dt_levels: Optional[Sequence[str]] = None,
+    mal_nodes: Optional[Sequence[int]] = None,
+    methods: Optional[Sequence[str]] = None,
+    label_flip_level: str = "L1",
+    metric: str = "clean_f1",
+) -> Path:
+    _ensure_parent(out_path)
+    if summary_df.empty:
+        return Path(out_path)
+
+    df = _apply_filters(
+        summary_df,
+        attacks=attacks,
+        methods=methods,
+        dt_levels=dt_levels,
+        mal_nodes=mal_nodes,
+    )
+    if df.empty:
+        return Path(out_path)
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    if attacks is None:
+        attacks = sorted(pd.unique(df["attack"]).tolist())
+
+    mean_col = f"{metric}_m" if f"{metric}_m" in df.columns else metric
+
+    for attack in attacks:
+        sub = df[df["attack"] == attack]
+        if attack == "label_flip":
+            sub = sub[sub.get("level", "") == label_flip_level]
+        by_tau = sub.groupby("tau_gate")[mean_col].agg(["mean", "std", "count"])
+        if by_tau.empty:
+            continue
+        x = pd.to_numeric(by_tau.index, errors="coerce").to_numpy(dtype=float)
+        y = by_tau["mean"].to_numpy(dtype=float)
+        c = by_tau["count"].to_numpy(dtype=int)
+        s = by_tau["std"].to_numpy(dtype=float)
+        ci = 1.96 * np.divide(s, np.sqrt(c), out=np.zeros_like(s), where=c > 0)
+        line = ax.plot(x, y, marker="o", linewidth=1.4, label=attack)
+        _ci_fill(ax, x, y, ci, color=line[0].get_color())
+
+    ax.set_title("clean F1 vs tau_gate")
+    ax.set_xlabel("tau_gate")
+    ax.set_ylabel("clean F1")
+    ax.set_ylim(0, 1)
+    ax.grid(alpha=0.2)
+    ax.legend()
+    fig.tight_layout()
+    plt.savefig(out_path, dpi=200)
+    plt.close(fig)
+    return Path(out_path)
+
+
+def plot_wmal_vs_tau(
+    summary_df: pd.DataFrame,
+    *,
+    out_path: str | Path,
+    attacks: Optional[Sequence[str]] = None,
+    dt_levels: Optional[Sequence[str]] = None,
+    mal_nodes: Optional[Sequence[int]] = None,
+    methods: Optional[Sequence[str]] = None,
+    label_flip_level: str = "L1",
+) -> Path:
+    return plot_cleanf1_vs_tau(
+        summary_df,
+        out_path=out_path,
+        attacks=attacks,
+        dt_levels=dt_levels,
+        mal_nodes=mal_nodes,
+        methods=methods,
+        label_flip_level=label_flip_level,
+        metric="w_mal",
+    )
+
+
+def plot_fp_benign_vs_tau(
+    summary_df: pd.DataFrame,
+    *,
+    out_path: str | Path,
+    attacks: Optional[Sequence[str]] = None,
+    dt_levels: Optional[Sequence[str]] = None,
+    mal_nodes: Optional[Sequence[int]] = None,
+    methods: Optional[Sequence[str]] = None,
+    label_flip_level: str = "L1",
+) -> Path:
+    _ensure_parent(out_path)
+    if summary_df.empty:
+        return Path(out_path)
+
+    df = _apply_filters(
+        summary_df,
+        attacks=attacks,
+        methods=methods,
+        dt_levels=dt_levels,
+        mal_nodes=mal_nodes,
+    )
+    metric = _choose_metric_column(df, "benign_pass_rate_m", "benign_pass_rate")
+    if df.empty or metric is None:
+        return Path(out_path)
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    if attacks is None:
+        attacks = sorted(pd.unique(df["attack"]).tolist())
+
+    for attack in attacks:
+        sub = df[df["attack"] == attack]
+        if attack == "label_flip":
+            sub = sub[sub.get("level", "") == label_flip_level]
+        by_tau = sub.groupby("tau_gate")[metric].agg(["mean", "std", "count"])
+        if by_tau.empty:
+            continue
+        x = pd.to_numeric(by_tau.index, errors="coerce").to_numpy(dtype=float)
+        fp = 1.0 - by_tau["mean"].to_numpy(dtype=float)
+        s = by_tau["std"].to_numpy(dtype=float)
+        c = by_tau["count"].to_numpy(dtype=int)
+        ci = 1.96 * np.divide(s, np.sqrt(c), out=np.zeros_like(s), where=c > 0)
+        line = ax.plot(x, fp, marker="o", linewidth=1.4, label=f"{attack}")
+        _ci_fill(ax, x, fp, ci, color=line[0].get_color())
+
+    ax.set_title("benign false positive rate vs tau_gate")
+    ax.set_xlabel("tau_gate")
+    ax.set_ylabel("1 - benign_pass_rate")
+    ax.set_ylim(0, 1)
+    ax.grid(alpha=0.2)
+    ax.legend()
+
+    fig.tight_layout()
+    plt.savefig(out_path, dpi=200)
+    plt.close(fig)
+    return Path(out_path)
+
+
+def plot_refsize_sensitivity(
+    summary_df: pd.DataFrame,
+    *,
+    out_dir: str | Path,
+    prefix: str = "refsize",
+    attacks: Optional[Sequence[str]] = None,
+    dt_levels: Optional[Sequence[str]] = None,
+    mal_nodes: Optional[Sequence[int]] = None,
+    methods: Optional[Sequence[str]] = None,
+    fixed_audit_size: Optional[int] = None,
+    fixed_lambda: Optional[float] = None,
+    fixed_tau: Optional[float] = None,
+    label_flip_level: str = "L1",
+) -> Dict[str, Path]:
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if summary_df.empty:
+        return {}
+
+    df = _apply_filters(
+        summary_df,
+        attacks=attacks,
+        methods=methods,
+        dt_levels=dt_levels,
+        mal_nodes=mal_nodes,
+        tau=fixed_tau,
+        lam_m=fixed_lambda,
+        audit_size=fixed_audit_size,
+    )
+    if df.empty:
+        return {}
+
+    if attacks is None:
+        attacks = sorted(pd.unique(df["attack"]).tolist())
+
+    out: Dict[str, Path] = {}
+    for metric in ["clean_f1", "w_mal"]:
+        fig, ax = plt.subplots(figsize=(7, 4))
+        for attack in attacks:
+            sub_attack = df[df["attack"] == attack]
+            if attack == "label_flip":
+                sub_attack = sub_attack[sub_attack.get("level", "") == label_flip_level]
+            by_size = sub_attack.groupby("ref_size")
+            xs = []
+            ys = []
+            ys_ci = []
+            for size, sg in by_size:
+                mean_col = f"{metric}_m" if f"{metric}_m" in sg.columns else metric
+                std_col = f"{metric}_s" if f"{metric}_s" in sg.columns else None
+                if mean_col not in sg.columns:
+                    continue
+                m = float(pd.to_numeric(sg[mean_col], errors="coerce").dropna().mean())
+                n = _count_from_group(sg, 1)
+                s = float(pd.to_numeric(sg[std_col], errors="coerce").dropna().iloc[0]) if std_col is not None else 0.0
+                ci = 1.96 * s / np.sqrt(max(1, n)) if np.isfinite(s) and n > 0 else 0.0
+                xs.append(int(size))
+                ys.append(m)
+                ys_ci.append(ci)
+
+            if not xs:
+                continue
+            order = np.argsort(xs)
+            xs = np.asarray(xs)[order]
+            ys = np.asarray(ys, dtype=float)[order]
+            ys_ci = np.asarray(ys_ci, dtype=float)[order]
+            line = ax.plot(xs, ys, marker="o", linewidth=1.4, label=attack)
+            _ci_fill(ax, xs, ys, ys_ci, color=line[0].get_color())
+
+        ax.set_xlabel("|X_ref|")
+        ax.set_ylabel(metric.replace("_", " "))
+        ax.set_title(f"{metric.replace('_',' ')} vs ref size")
+        ax.grid(alpha=0.2)
+        ax.legend()
+        path = out_dir / f"{prefix}_{metric}_vs_refsize.png"
+        fig.tight_layout()
+        plt.savefig(path, dpi=200)
+        plt.close(fig)
+        out[f"{metric}_vs_refsize"] = path
+
+    return out
+
+
+def plot_auditsize_sensitivity(
+    summary_df: pd.DataFrame,
+    *,
+    out_dir: str | Path,
+    prefix: str = "auditsize",
+    attacks: Optional[Sequence[str]] = None,
+    dt_levels: Optional[Sequence[str]] = None,
+    mal_nodes: Optional[Sequence[int]] = None,
+    methods: Optional[Sequence[str]] = None,
+    fixed_ref_size: Optional[int] = None,
+    fixed_lambda: Optional[float] = None,
+    fixed_tau: Optional[float] = None,
+    label_flip_level: str = "L1",
+) -> Dict[str, Path]:
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if summary_df.empty:
+        return {}
+
+    df = _apply_filters(
+        summary_df,
+        attacks=attacks,
+        methods=methods,
+        dt_levels=dt_levels,
+        mal_nodes=mal_nodes,
+        tau=fixed_tau,
+        lam_m=fixed_lambda,
+        ref_size=fixed_ref_size,
+    )
+    if df.empty:
+        return {}
+
+    if attacks is None:
+        attacks = sorted(pd.unique(df["attack"]).tolist())
+
+    out: Dict[str, Path] = {}
+    for metric in ["clean_f1", "w_mal"]:
+        fig, ax = plt.subplots(figsize=(7, 4))
+        for attack in attacks:
+            sub_attack = df[df["attack"] == attack]
+            if attack == "label_flip":
+                sub_attack = sub_attack[sub_attack.get("level", "") == label_flip_level]
+            by_size = sub_attack.groupby("audit_size")
+            xs = []
+            ys = []
+            ys_ci = []
+            for size, sg in by_size:
+                mean_col = f"{metric}_m" if f"{metric}_m" in sg.columns else metric
+                std_col = f"{metric}_s" if f"{metric}_s" in sg.columns else None
+                if mean_col not in sg.columns:
+                    continue
+                m = float(pd.to_numeric(sg[mean_col], errors="coerce").dropna().mean())
+                n = _count_from_group(sg, 1)
+                s = float(pd.to_numeric(sg[std_col], errors="coerce").dropna().iloc[0]) if std_col is not None else 0.0
+                ci = 1.96 * s / np.sqrt(max(1, n)) if np.isfinite(s) and n > 0 else 0.0
+                xs.append(int(size))
+                ys.append(m)
+                ys_ci.append(ci)
+
+            if not xs:
+                continue
+            order = np.argsort(xs)
+            xs = np.asarray(xs)[order]
+            ys = np.asarray(ys, dtype=float)[order]
+            ys_ci = np.asarray(ys_ci, dtype=float)[order]
+            line = ax.plot(xs, ys, marker="o", linewidth=1.4, label=attack)
+            _ci_fill(ax, xs, ys, ys_ci, color=line[0].get_color())
+
+        ax.set_xlabel("|D_ref^l|")
+        ax.set_ylabel(metric.replace("_", " "))
+        ax.set_title(f"{metric.replace('_',' ')} vs audit size")
+        ax.grid(alpha=0.2)
+        ax.legend()
+        path = out_dir / f"{prefix}_{metric}_vs_auditsize.png"
+        fig.tight_layout()
+        plt.savefig(path, dpi=200)
+        plt.close(fig)
+        out[f"{metric}_vs_auditsize"] = path
+
+    return out
+
+
+def plot_passrate_vs_round(
+    rounds_df: pd.DataFrame,
+    *,
+    dt_level: str,
+    mal_nodes: int,
+    attacks: Optional[Sequence[str]] = None,
+    out_path: str | Path,
+    method: str = "weighted",
+    metric: str = "benign_pass_rate",
+    label_flip_level: str = "L1",
+) -> Path:
+    _ensure_parent(out_path)
+    if rounds_df.empty:
+        return Path(out_path)
+    if "benign_pass_rate" not in rounds_df.columns or "malicious_pass_rate" not in rounds_df.columns:
+        return Path(out_path)
+
+    df = rounds_df.copy()
+    df = df[df["dt_level"].astype(str) == str(dt_level)]
+    df = df[df["mal_nodes"].astype(int) == int(mal_nodes)]
+    df = df[df["method"] == method]
+
+    if attacks is None:
+        attacks = sorted(pd.unique(df["attack"]).tolist())
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    for attack in attacks:
+        sub = df[df["attack"] == attack]
+        if attack == "label_flip" and "level" in sub.columns:
+            sub = sub[sub["level"] == label_flip_level]
+
+        if metric == "benign_pass_rate":
+            bcol = "benign_pass_rate"
+            mcol = "malicious_pass_rate"
+            for idx, (col, label, marker) in enumerate(
+                [(bcol, f"{attack} benign", "o"), (mcol, f"{attack} malicious", "s")]
+            ):
+                by_round = sub.groupby("round")[col].agg(["mean", "std", "count"])
+                r = by_round.index.to_numpy()
+                y = by_round["mean"].to_numpy(dtype=float)
+                c = by_round["count"].to_numpy(dtype=int)
+                s = by_round["std"].to_numpy(dtype=float)
+                ci = 1.96 * np.divide(s, np.sqrt(c), out=np.zeros_like(s), where=c > 0)
+                line = ax.plot(r, y, marker=marker, linewidth=1.2, label=label)
+                _ci_fill(ax, r, y, ci, color=line[0].get_color())
+        else:
+            by_round = sub.groupby("round")[metric].agg(["mean", "std", "count"])
+            r = by_round.index.to_numpy()
+            y = by_round["mean"].to_numpy(dtype=float)
+            c = by_round["count"].to_numpy(dtype=int)
+            s = by_round["std"].to_numpy(dtype=float)
+            ci = 1.96 * np.divide(s, np.sqrt(c), out=np.zeros_like(s), where=c > 0)
+            line = ax.plot(r, y, marker="o", linewidth=1.2, label=attack)
+            _ci_fill(ax, r, y, ci, color=line[0].get_color())
+
+    ax.set_title(f"Pass-rate vs round (f={mal_nodes}, dt={dt_level}, {method})")
+    ax.set_xlabel("Round")
+    ax.set_ylabel("Rate")
+    ax.set_ylim(0, 1)
+    ax.grid(alpha=0.2)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    plt.savefig(out_path, dpi=200)
+    plt.close(fig)
+    return Path(out_path)
+
+def plot_adaptive_mimic_vs_lambda(
+    runs_df: pd.DataFrame,
+    *,
+    nodes_df: Optional[pd.DataFrame] = None,
+    dt_level: str = "D1",
+    out_dir: str | Path = ".",
+    mal_nodes: Optional[Sequence[int]] = None,
+    method: str = "weighted",
+    fixed_ref_size: Optional[int] = None,
+    fixed_audit_size: Optional[int] = None,
+    label_flip_level: str = "L1",
+    out_prefix: str = "adaptive_mimic",
+) -> Dict[str, Path]:
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if runs_df.empty:
+        return {}
+
+    df = runs_df[(runs_df["attack"] == "adaptive_mimic")]
+    if df.empty:
+        return {}
+    if mal_nodes is not None and "mal_nodes" in df.columns:
+        df = df[df["mal_nodes"].isin(list(mal_nodes))]
+    if dt_level is not None:
+        df = df[df["dt_level"].astype(str) == str(dt_level)]
+    if method is not None and "method" in df.columns:
+        df = df[df["method"] == method]
+    if fixed_ref_size is not None:
+        df = df[pd.to_numeric(df["ref_size"], errors="coerce") == int(fixed_ref_size)]
+    if fixed_audit_size is not None:
+        df = df[pd.to_numeric(df["audit_size"], errors="coerce") == int(fixed_audit_size)]
+    if "level" in df.columns:
+        df = df[df["level"] == label_flip_level]
+
+    if df.empty:
+        return {}
+
+    out: Dict[str, Path] = {}
+
+    # clean F1 vs lambda
+    fig1, ax1 = plt.subplots(figsize=(7, 4))
+    by_lm = df.groupby("lambda_m")
+    xs = []
+    ys = []
+    ys_ci = []
+    for lm, sg in by_lm:
+        if "clean_f1_m" in sg.columns:
+            m = float(pd.to_numeric(sg["clean_f1_m"], errors="coerce").dropna().mean())
+            s = float(pd.to_numeric(sg["clean_f1_s"], errors="coerce").dropna().iloc[0]) if "clean_f1_s" in sg.columns else 0.0
+            n = _count_from_group(sg, len(sg))
+        elif "clean_f1" in sg.columns:
+            m, s = _mean_ci95(sg["clean_f1"])
+            n = int(len(sg))
+        else:
+            continue
+        ci = 1.96 * s / np.sqrt(max(1, n)) if np.isfinite(s) and n > 0 else 0.0
+        xs.append(float(lm))
+        ys.append(m)
+        ys_ci.append(ci)
+
+    if xs:
+        order = np.argsort(xs)
+        xs = np.asarray(xs)[order]
+        ys = np.asarray(ys, dtype=float)[order]
+        ys_ci = np.asarray(ys_ci, dtype=float)[order]
+        line = ax1.plot(xs, ys, marker="o", linewidth=1.4)
+        _ci_fill(ax1, xs, ys, ys_ci, color=line[0].get_color())
+        ax1.set_xlabel("lambda_m")
+        ax1.set_ylabel("clean F1")
+        ax1.set_ylim(0, 1)
+        ax1.set_title("Adaptive mimic: clean F1 vs lambda")
+        ax1.grid(alpha=0.2)
+        p1 = out_dir / f"{out_prefix}_cleanf1_vs_lambda.png"
+        fig1.tight_layout()
+        plt.savefig(p1, dpi=200)
+        plt.close(fig1)
+        out["cleanf1"] = p1
+
+    # W_mal vs lambda
+    fig2, ax2 = plt.subplots(figsize=(7, 4))
+    xs = []
+    ys = []
+    ys_ci = []
+    by_lm = df.groupby("lambda_m")
+    for lm, sg in by_lm:
+        if "w_mal_m" in sg.columns:
+            m = float(pd.to_numeric(sg["w_mal_m"], errors="coerce").dropna().mean())
+            s = float(pd.to_numeric(sg["w_mal_s"], errors="coerce").dropna().iloc[0]) if "w_mal_s" in sg.columns else 0.0
+            n = _count_from_group(sg, len(sg))
+        elif "w_mal" in sg.columns:
+            m, s = _mean_ci95(sg["w_mal"])
+            n = int(len(sg))
+        else:
+            continue
+        ci = 1.96 * s / np.sqrt(max(1, n)) if np.isfinite(s) and n > 0 else 0.0
+        xs.append(float(lm))
+        ys.append(m)
+        ys_ci.append(ci)
+
+    if xs:
+        order = np.argsort(xs)
+        xs = np.asarray(xs)[order]
+        ys = np.asarray(ys, dtype=float)[order]
+        ys_ci = np.asarray(ys_ci, dtype=float)[order]
+        line = ax2.plot(xs, ys, marker="o", linewidth=1.4)
+        _ci_fill(ax2, xs, ys, ys_ci, color=line[0].get_color())
+        ax2.set_xlabel("lambda_m")
+        ax2.set_ylabel("W_mal")
+        ax2.set_ylim(0, 1)
+        ax2.set_title("Adaptive mimic: W_mal vs lambda")
+        ax2.grid(alpha=0.2)
+        p2 = out_dir / f"{out_prefix}_wmal_vs_lambda.png"
+        fig2.tight_layout()
+        plt.savefig(p2, dpi=200)
+        plt.close(fig2)
+        out["wmal"] = p2
+
+    # R4 distribution vs lambda (benign vs malicious)
+    if nodes_df is not None and not nodes_df.empty:
+        ndf = nodes_df.copy()
+        ndf = ndf[ndf["attack"] == "adaptive_mimic"]
+        ndf = ndf[ndf["dt_level"].astype(str) == str(dt_level)]
+        if method is not None and "method" in ndf.columns:
+            ndf = ndf[ndf["method"] == method]
+        if mal_nodes is not None and "mal_nodes" in ndf.columns:
+            ndf = ndf[ndf["mal_nodes"].isin(list(mal_nodes))]
+        if fixed_ref_size is not None and "ref_size" in ndf.columns:
+            ndf = ndf[pd.to_numeric(ndf["ref_size"], errors="coerce") == int(fixed_ref_size)]
+        if fixed_audit_size is not None and "audit_size" in ndf.columns:
+            ndf = ndf[pd.to_numeric(ndf["audit_size"], errors="coerce") == int(fixed_audit_size)]
+        if not ndf.empty and "R4" in ndf.columns:
+            if "level" in ndf.columns:
+                ndf = ndf[ndf["level"] == label_flip_level]
+
+            by_lambda = ndf.groupby("lambda_m")
+            fig3, ax3 = plt.subplots(figsize=(7, 4))
+            first_label = True
+            for group_name, sg in by_lambda:
+                if sg.empty:
+                    continue
+                b = pd.to_numeric(sg.loc[sg["is_malicious"] == 0, "R4"], errors="coerce").dropna()
+                m = pd.to_numeric(sg.loc[sg["is_malicious"] == 1, "R4"], errors="coerce").dropna()
+                if b.empty and m.empty:
+                    continue
+                ax3.scatter(
+                    [float(group_name)] * len(b),
+                    b,
+                    alpha=0.55,
+                    marker="o",
+                    label="benign" if first_label else None,
+                )
+                ax3.scatter(
+                    [float(group_name)] * len(m),
+                    m,
+                    alpha=0.55,
+                    marker="s",
+                    label="malicious" if first_label else None,
+                )
+                first_label = False
+
+            if len(ax3.collections) > 0:
+                ax3.set_xlabel("lambda_m")
+                ax3.set_ylabel("R4")
+                ax3.set_ylim(0, 1)
+                ax3.set_title("Adaptive mimic: R4 distribution vs lambda")
+                ax3.grid(alpha=0.2)
+                p3 = out_dir / f"{out_prefix}_r4_vs_lambda.png"
+                ax3.legend()
+                fig3.tight_layout()
+                plt.savefig(p3, dpi=200)
+                plt.close(fig3)
+                out["r4"] = p3
+
+    return out
+
+
+def make_plots_from_csv(
+    *,
+    runs_csv: str = "runs.csv",
+    summary_csv: str = "summary.csv",
+    out_dir: str = ".",
+    attacks: Optional[Sequence[str]] = None,
+    methods: Optional[Sequence[str]] = None,
+    mal_nodes: Optional[Sequence[int]] = None,
+    dt_levels: Optional[Sequence[str]] = None,
+    label_flip_level: str = "L1",
+    num_nodes: int = 10,
+    metric: str = "polluted_f1",
+    tau: Optional[float] = None,
+    tau_sweep: Optional[Sequence[float]] = None,
+    lam_m: Optional[float] = None,
+    ref_size: Optional[int] = None,
+    audit_size: Optional[int] = None,
+) -> Dict[str, Path]:
+    out_dir_path = Path(out_dir)
+    out_dir_path.mkdir(parents=True, exist_ok=True)
+
+    summary_df = pd.read_csv(summary_csv) if summary_csv else pd.DataFrame()
+    runs_df = pd.read_csv(runs_csv) if runs_csv else pd.DataFrame()
+    validate_plot_inputs(
+        summary_df=summary_df,
+        runs_df=runs_df,
+        attacks=attacks,
+        methods=methods,
+        mal_nodes=mal_nodes,
+        dt_levels=dt_levels,
+    )
+    outputs: Dict[str, Path] = {}
+    dt_levels_for_plot = ["D1"]
+
+    if not summary_df.empty:
+        # optional filtering
+        sum_df = _apply_filters(
+            summary_df,
+            attacks=attacks,
+            methods=methods,
+            mal_nodes=mal_nodes,
+            dt_levels=dt_levels,
+            tau=tau,
+            tau_sweep=tau_sweep,
+            lam_m=lam_m,
+            ref_size=ref_size,
+            audit_size=audit_size,
         )
 
-        for m in methods:
-            df_m = df_a[df_a["method"] == str(m)]
-            ys, yerr = [], []
-            for f in x:
-                hit = df_m[df_m["mal_nodes"] == int(f)]
-                if len(hit) == 0:
-                    ys.append(np.nan)
-                    yerr.append(np.nan)
-                else:
-                    ys.append(float(hit.iloc[0][m_col]))
-                    yerr.append(float(hit.iloc[0][s_col]))
-            ax.errorbar(x, ys, yerr=yerr, marker="o", capsize=3, label=m)
+        if mal_nodes is None:
+            if "mal_nodes" in sum_df.columns:
+                mal_nodes_for_plot = sorted(int(x) for x in pd.unique(sum_df["mal_nodes"]) if pd.notna(x))
+            else:
+                mal_nodes_for_plot = [3, 5, 0]
+        else:
+            mal_nodes_for_plot = list(mal_nodes)
 
-        ax.set_title(f"{attack} (dt={dt_level})")
-        ax.set_xlabel("f (malicious clients)")
-        ax.grid(True, linestyle="--", alpha=0.4)
+        if dt_levels is None:
+            if "dt_level" in sum_df.columns:
+                dt_levels_for_plot = [str(x) for x in pd.unique(sum_df["dt_level"]) if str(x).strip()]
+        else:
+            dt_levels_for_plot = list(dt_levels)
 
-    axes[0].set_ylabel("polluted macro-F1" if metric == "polluted_f1" else "polluted accuracy")
-    handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=min(len(methods), 4))
-    fig.tight_layout(rect=[0, 0, 1, 0.90])
-    fig.savefig(out_path)
-    plt.close(fig)
+        # FigA-like: clean holdout vs f
+        for dt in dt_levels_for_plot:
+            path = out_dir_path / f"plotA_{metric}_dt{dt}.png"
+            out = plot_clean_holdout_vs_f(
+                sum_df,
+                attacks=attacks or ["label_flip", "stealth_amp", "dt_logit_scale"],
+                methods=methods or ["weighted", "mean", "median", "trimmed_mean"],
+                dt_level=dt,
+                mal_nodes=mal_nodes_for_plot,
+                out_path=path,
+                metric="clean_f1" if metric in {"clean_f1", "clean_acc", "polluted_f1", "polluted_acc", "w_mal"} else metric,
+                label_flip_level=label_flip_level,
+            )
+            outputs[f"clean_holdout_vs_f_{dt}"] = out
+
+        # FigB-like: Wmal vs round for largest f
+        target_f = max(mal_nodes_for_plot) if mal_nodes_for_plot else 5
+        if not runs_df.empty:
+            rounds_df = runs_df
+        else:
+            rounds_df = pd.DataFrame()
+        if "round" not in rounds_df.columns and "round" in summary_df.columns:
+            # best effort only
+            pass
+        for dt in dt_levels_for_plot:
+            path = out_dir_path / f"plotB_wmal_vs_round_dt{dt}.png"
+            try:
+                out = plot_wmal_vs_round(
+                    rounds_df,
+                    dt_level=dt,
+                    mal_nodes=target_f,
+                    attacks=attacks or ["label_flip", "dt_logit_scale"],
+                    out_path=path,
+                    method="weighted",
+                    label_flip_level=label_flip_level,
+                )
+                outputs[f"wmal_vs_round_{dt}"] = out
+            except Exception:
+                pass
+
+        # sensitivity plots
+        if (tau_sweep is not None and len(tau_sweep) > 1) or ("tau_gate" in sum_df.columns and sum_df["tau_gate"].nunique() > 1):
+            path = out_dir_path / "plot_cleanf1_vs_tau.png"
+            outputs["cleanf1_vs_tau"] = plot_cleanf1_vs_tau(
+                sum_df,
+                out_path=path,
+                attacks=attacks,
+                dt_levels=dt_levels_for_plot,
+                mal_nodes=mal_nodes_for_plot,
+                methods=methods,
+                label_flip_level=label_flip_level,
+                metric="clean_f1",
+            )
+            path = out_dir_path / "plot_wmal_vs_tau.png"
+            outputs["wmal_vs_tau"] = plot_wmal_vs_tau(
+                sum_df,
+                out_path=path,
+                attacks=attacks,
+                dt_levels=dt_levels_for_plot,
+                mal_nodes=mal_nodes_for_plot,
+                methods=methods,
+                label_flip_level=label_flip_level,
+            )
+            if "benign_pass_rate_m" in sum_df.columns:
+                path = out_dir_path / "plot_fp_benign_vs_tau.png"
+                outputs["fp_benign_vs_tau"] = plot_fp_benign_vs_tau(
+                    sum_df,
+                    out_path=path,
+                    attacks=attacks,
+                    dt_levels=dt_levels_for_plot,
+                    mal_nodes=mal_nodes_for_plot,
+                    methods=methods,
+                    label_flip_level=label_flip_level,
+                )
+
+        # fallback table
+        if "fallback_rate" in runs_df.columns or "fallback_rate_m" in summary_df.columns:
+            p = out_dir_path / "fallback_prob_table.csv"
+            table = plot_fallback_prob_table(
+                runs_df if not runs_df.empty else summary_df,
+                attacks=attacks,
+                dt_levels=dt_levels_for_plot,
+                mal_nodes=mal_nodes_for_plot,
+                methods=methods,
+            )
+            if p and not table.empty:
+                table.to_csv(p, index=False)
+                outputs["fallback_prob_table"] = p
+
+    # optional run-level pass-rate and sensitivity plots
+    if not runs_df.empty:
+        if dt_levels is None and "dt_level" in runs_df.columns:
+            dt_levels_for_plot = [str(x) for x in pd.unique(runs_df["dt_level"]) if str(x).strip()]
+        for dt in dt_levels_for_plot:
+            path = out_dir_path / f"plot_fallback_vs_round_dt{dt}.png"
+            if "fallback_flag" in runs_df.columns:
+                # deprecated: round traces are in rounds_df, not runs_df. keep graceful skip.
+                outputs["fallback_vs_round"] = path
+
+    return outputs
+
+
+__all__ = [
+    "load_nodes_csv",
+    "load_rounds_csv",
+    "load_summary_csv",
+    "parse_csv_list",
+    "validate_plot_inputs",
+    "plot_ablation_multiattack",
+    "plot_clean_holdout_vs_f",
+    "plot_cleanf1_vs_tau",
+    "plot_fp_benign_vs_tau",
+    "plot_wmal_vs_tau",
+    "plot_sdt_vs_round",
+    "plot_fallback_prob_table",
+    "plot_r4_distribution",
+    "plot_wmal_vs_round",
+    "plot_refsize_sensitivity",
+    "plot_auditsize_sensitivity",
+    "plot_passrate_vs_round",
+    "plot_adaptive_mimic_vs_lambda",
+    "make_plots_from_csv",
+]

@@ -1,9 +1,9 @@
-"""
+﻿"""
 dt_r4/federated.py
 
-联邦模拟核心组件：
-- DroneNode：本地训练 + 恶意攻击（可选）
-- CentralServer：声誉计算 + 聚合 + R4 一致性
+联邦模拟核心组件�?
+- DroneNode：本地训�?+ 恶意攻击（可选）
+- CentralServer：声誉计�?+ 聚合 + R4 一致�?
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from typing import Dict, Any, List, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 from sklearn.metrics import accuracy_score
 
 from .config import (
@@ -33,6 +34,7 @@ from .runtime import device
 from .models import StudentNet
 from .utils import weighted_average_aggregation, sigmoid, exponential_decay
 from .twin import make_r4_mask_and_weights
+from .attacks import apply_attack
 
 
 def apply_backdoor_trigger(
@@ -133,6 +135,9 @@ class DroneNode:
         label_flip_epochs: Optional[int] = None,
         label_flip_lr: Optional[float] = None,
         label_flip_pick_strategy: Optional[str] = None,
+        adaptive_mimic_lambda: float = 0.0,
+        adaptive_mimic_ref_data: Optional[torch.Tensor] = None,
+        adaptive_mimic_teacher_probs: Optional[torch.Tensor] = None,
     ):
         self.drone_id = drone_id
         self.is_malicious = is_malicious
@@ -206,6 +211,15 @@ class DroneNode:
         # optional noise-ascent attack (malicious only)
         self.noise_attack_data: Optional[SimpleData] = None
         self.noise_ascent_beta: float = float(getattr(C, "NOISE_ASCENT_BETA", 0.0))
+        self.adaptive_mimic_lambda = float(adaptive_mimic_lambda)
+        self.adaptive_mimic_ref_data = adaptive_mimic_ref_data
+        self.adaptive_mimic_teacher_probs = adaptive_mimic_teacher_probs
+        self.last_attack_payload: Dict[str, float] = {
+            "attack_enabled": 0.0,
+            "mimic_loss": float("nan"),
+            "poison_loss": float("nan"),
+            "final_kl_to_teacher": float("nan"),
+        }
 
     def receive_global_model(self, global_model: StudentNet):
         self.local_model = copy.deepcopy(global_model).to(device)
@@ -246,6 +260,11 @@ class DroneNode:
         best_sd = None
         worst_acc = float("inf")
         worst_sd = None
+
+        mimic_loss_total = 0.0
+        mimic_steps = 0
+        poison_loss_total = 0.0
+        final_kl = float("nan")
 
         for _ in range(epochs):
             self.local_model.train()
@@ -302,8 +321,39 @@ class DroneNode:
                     student_logp, target_probs, reduction="batchmean"
                 ) * (T * T)
                 loss = ce_loss + self.distill_alpha * distill_loss
-            loss.backward()
-            optimizer.step()
+
+            if (
+                self.is_malicious
+                and self.attack_mode == "adaptive_mimic"
+                and self.adaptive_mimic_lambda > 0
+                and self.adaptive_mimic_ref_data is not None
+                and self.adaptive_mimic_teacher_probs is not None
+            ):
+                payload = apply_attack(
+                    self.local_model,
+                    self.ref_model_for_attack,
+                    (x_train, y_train),
+                    self.adaptive_mimic_ref_data,
+                    self.adaptive_mimic_teacher_probs,
+                    {
+                        "attack_mode": self.attack_mode,
+                        "adaptive_mimic_lambda": self.adaptive_mimic_lambda,
+                    },
+                )
+                if payload.get("attack_enabled", 0.0) > 0.5:
+                    mimic_loss = float(payload.get("mimic_loss", float("nan")))
+                    poison_loss = float(payload.get("poison_loss", float("nan")))
+                    if np.isfinite(mimic_loss):
+                        mimic_loss_total += float(mimic_loss)
+                        mimic_steps += 1
+                    if np.isfinite(poison_loss):
+                        poison_loss_total += float(poison_loss)
+                    final_kl = float(payload.get("final_kl_to_teacher", float("nan")))
+                    if np.isfinite(mimic_loss):
+                        loss = loss + float(self.adaptive_mimic_lambda) * mimic_loss
+            if torch.isfinite(loss).all():
+                loss.backward()
+                optimizer.step()
 
             if pick_best or pick_worst:
                 self.local_model.eval()
@@ -319,7 +369,31 @@ class DroneNode:
                     if pick_worst and acc < worst_acc:
                         worst_acc = acc
                         worst_sd = copy.deepcopy(self.local_model.state_dict())
-
+        self.last_attack_payload = {
+            "attack_enabled": 0.0,
+            "mimic_loss": float("nan"),
+            "poison_loss": float("nan"),
+            "final_kl_to_teacher": float("nan"),
+        }
+        if self.attack_mode == "adaptive_mimic" and self.is_malicious:
+            mimic_avg = (
+                float(mimic_loss_total / mimic_steps)
+                if mimic_steps > 0
+                else float("nan")
+            )
+            poison_avg = float(
+                poison_loss_total / (mimic_steps if mimic_steps > 0 else 1)
+            )
+            if not np.isfinite(mimic_avg):
+                mimic_avg = float("nan")
+                poison_avg = float("nan")
+                final_kl = float("nan")
+            self.last_attack_payload = {
+                "attack_enabled": 1.0 if mimic_steps > 0 else 0.0,
+                "mimic_loss": float(mimic_avg),
+                "poison_loss": float(poison_avg),
+                "final_kl_to_teacher": float(final_kl),
+            }
         if pick_best and best_sd is not None:
             self.local_model.load_state_dict(best_sd)
         elif pick_worst and worst_sd is not None:
@@ -336,6 +410,8 @@ class DroneNode:
         if self.attack_mode == "none":
             return
         if self.attack_mode in {"label_flip", "backdoor_trigger"}:
+            return
+        if self.attack_mode == "adaptive_mimic":
             return
 
         if self.attack_mode == "dt_logit_scale":
@@ -471,6 +547,7 @@ class CentralServer:
         self.ablation_config = ablation_config
         self.r4_alpha = float(r4_alpha)
         self.use_perf_penalty = bool(use_perf_penalty)
+        self.r4_reference_mode = "twin"
 
         self.reputation: Dict[int, float] = {}
         self.data_age: Dict[int, int] = {}
@@ -478,12 +555,12 @@ class CentralServer:
         self.reputation_log: List[Dict[str, Any]] = []
         self.last_broadcast_state = None
 
-        # Phase 2：预计算 twin reference（softmax + mask + weights）
+        # Phase 2：预计算 twin reference（softmax + mask + weights�?
         self.twin_probs_ref: Optional[torch.Tensor] = None  # [N,2]
         self.r4_mask: Optional[torch.Tensor] = None  # [N] bool
         self.r4_weights: Optional[torch.Tensor] = None  # [N] float
         self.r4_weights_att: Optional[torch.Tensor] = (
-            None  # [N] float, 非 normal 类的权重
+            None  # [N] float, �?normal 类的权重
         )
         self.teacher_probs_ref: Optional[torch.Tensor] = None  # [N,C]
         self.teacher_preds_ref: Optional[torch.Tensor] = None  # [N]
@@ -507,38 +584,37 @@ class CentralServer:
         twin_logits_for_probs: torch.Tensor,
         twin_logits_for_mask: torch.Tensor,
         temperature: float = 1.0,
+        preserve_teacher_cache: bool = False,
     ):
         """
-        twin_logits_for_probs: 用于 KL 的孪生分布（当前 L0/L1/L2）
-        twin_logits_for_mask : 仅用于定义 normal prior 区域的 mask（固定用 L0）
-        """
-        # clear teacher reference to force twin-based path when both are present
-        self.teacher_probs_ref = None
-        self.teacher_preds_ref = None
-        self.teacher_mask = None
+        twin_logits_for_probs: 用于 KL 的孪生分布（当前 L0/L1/L2�?        twin_logits_for_mask : 仅用于定�?normal prior 区域�?mask（固定用 L0�?        """
+        if not preserve_teacher_cache:
+            self.teacher_probs_ref = None
+            self.teacher_preds_ref = None
+            self.teacher_mask = None
         with torch.no_grad():
             softmax = nn.Softmax(dim=1)
 
-            # KL 用的 twin probs（可随 L1/L2 变化）
+            # KL 用的 twin probs（可�?L1/L2 变化�?
             twin_probs = softmax(twin_logits_for_probs / temperature)
 
-            # mask 用的 twin probs（固定用 L0）
+            # mask 用的 twin probs（固定用 L0�?
             mask_probs = softmax(twin_logits_for_mask / temperature)
 
-            # 先拿到置信度与预测，以便构造“类均衡”权重
+            # 先拿到置信度与预测，以便构造“类均衡”权�?
             conf, pred = mask_probs.max(dim=1)
             mask_conf = torch.ones_like(conf, dtype=torch.bool)
             if C.R4_USE_ONLY_CONFIDENT:
                 mask_conf &= conf >= C.R4_CONF_THRESH
 
-            # Normal 与非 Normal 各自一套 mask/权重，后续 KL 平均
+            # Normal 与非 Normal 各自一�?mask/权重，后�?KL 平均
             mask_norm = mask_conf & (pred == C.NORMAL_CLASS_INDEX)
             mask_att = mask_conf & (pred != C.NORMAL_CLASS_INDEX)
 
             weights_norm = conf * mask_norm.float()
             weights_att = conf * mask_att.float()
 
-            # 权重集中度（便于诊断）
+            # 权重集中度（便于诊断�?
             def _top1_frac(w: torch.Tensor) -> float:
                 s = float(w.sum().item())
                 return float(w.max().item()) / s if s > 1e-12 else float("nan")
@@ -563,6 +639,7 @@ class CentralServer:
             self.r4_mask_att_frac = float(mask_att.float().mean().item())
             self.r4_mask_att_count = int(mask_att.sum().item())
             self.r4_mask_att_top1_frac = float(top1_att)
+        self.r4_reference_mode = "twin"
 
     def set_teacher_reference(
         self,
@@ -581,8 +658,6 @@ class CentralServer:
             raise ValueError("set_teacher_reference requires teacher_probs or teacher_logits.")
 
         with torch.no_grad():
-            # clear twin reference to avoid mixing modes
-            self.twin_probs_ref = None
             self.r4_weights_att = None
 
             if teacher_probs is None:
@@ -622,6 +697,76 @@ class CentralServer:
             self.r4_mask_att_frac = 0.0
             self.r4_mask_att_count = 0
             self.r4_mask_att_top1_frac = float("nan")
+        self.r4_reference_mode = "teacher"
+
+    def compute_server_validation_weights(
+        self,
+        local_logits,
+        target_probs: Optional[torch.Tensor] = None,
+        target_labels: Optional[torch.Tensor] = None,
+        temperature: float = 1.0,
+        alpha: float = 1.0,
+    ):
+        """
+        Build non-negative server-validation scores for each client.
+
+        Args:
+            local_logits: sequence or dict of [N_local, C] tensors per client.
+            target_probs: optional target label distribution [N_local, C].
+            target_labels: optional hard target labels [N_local].
+
+        Returns:
+            Tensor of shape [num_clients] with unnormalized nonnegative scores.
+        """
+        if target_probs is None and target_labels is None:
+            # no signal -> all equal score
+            if isinstance(local_logits, dict):
+                n_nodes = int(len(local_logits))
+            else:
+                n_nodes = len(local_logits)
+            return torch.ones(n_nodes, device=device, dtype=torch.float32)
+
+        if isinstance(local_logits, dict):
+            logits_iter = [
+                local_logits[k]
+                for k in sorted(local_logits.keys(), key=lambda x: int(x))
+            ]
+        elif isinstance(local_logits, (list, tuple)):
+            logits_iter = list(local_logits)
+        else:
+            raise TypeError("local_logits must be a list/tuple/dict of per-client tensors")
+
+        temp = float(temperature)
+        alpha = float(alpha)
+        ce = nn.CrossEntropyLoss(reduction="mean")
+        eps = float(getattr(C, "SERVER_VAL_EPS", 1e-12))
+        scores = []
+        for logits in logits_iter:
+            if logits is None or (isinstance(logits, torch.Tensor) and logits.numel() == 0):
+                scores.append(torch.tensor(0.0, device=device))
+                continue
+            z = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+            if target_probs is not None:
+                if logits.shape[0] != target_probs.shape[0]:
+                    raise ValueError("target_probs size mismatch for server validation")
+                p = F.softmax(logits / temp, dim=1)
+                t = target_probs.to(logits.device)
+                t = t.to(dtype=p.dtype).clamp_min(eps)
+                loss = -(t * torch.log(p.clamp_min(eps))).sum(dim=1).mean()
+                z = -loss * alpha
+            elif target_labels is not None:
+                if logits.shape[0] != target_labels.shape[0]:
+                    raise ValueError("target_labels size mismatch for server validation")
+                y = target_labels.to(logits.device).long()
+                if y.numel() == 0:
+                    z = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+                else:
+                    loss = ce(logits / temp, y)
+                    z = -loss * alpha
+            score = torch.exp(z).clamp_min(eps)
+            scores.append(score)
+
+        return torch.stack([s.to(dtype=torch.float32) for s in scores], dim=0)
 
     def aggregate_models(self, local_models):
         for i, m in enumerate(local_models):
@@ -648,9 +793,24 @@ class CentralServer:
 
     def compute_r4(self, local_logits: torch.Tensor, temperature: float = 1.0) -> float:
         """
-        Semantic R4 (preferred): teacher vs student consistency on reference.
-        Fallback: twin-based KL if teacher reference not provided.
+        Compute R4 according to self.r4_reference_mode.
+        Supported modes:
+            - "teacher": server.teacher_probs_ref / make_r4_teacher
+            - "twin":    self.twin_probs_ref / make_r4_twin
         """
+        if self.r4_reference_mode == "teacher":
+            if self.teacher_probs_ref is not None:
+                return self._compute_r4_teacher(local_logits, temperature=temperature)
+            if self.twin_probs_ref is not None and self.r4_weights is not None:
+                return self._compute_r4_twin(local_logits, temperature=temperature)
+            return 0.5
+        if self.r4_reference_mode == "twin":
+            if self.twin_probs_ref is not None and self.r4_weights is not None:
+                return self._compute_r4_twin(local_logits, temperature=temperature)
+            if self.teacher_probs_ref is not None:
+                return self._compute_r4_teacher(local_logits, temperature=temperature)
+            return 0.5
+        # compatibility fallback if unexpected mode value
         if self.teacher_probs_ref is not None:
             return self._compute_r4_teacher(local_logits, temperature=temperature)
         if self.twin_probs_ref is not None and self.r4_weights is not None:
@@ -817,13 +977,13 @@ class CentralServer:
             getattr(self, "_last_r4_trace_tmp", float("nan"))
         )
 
-        # R4 基于 twin 的准入门控
+        # R4 基于 twin 的准入门�?
         r4_shrink = 1.0
         beta4_eff = 0.0
         tau = float(getattr(C, "R4_GATE_TAU", 0.50))
         if "R4" in active_r:
             eps = float(getattr(C, "R4_GATE_EPS", 1e-8))
-            soft = float(getattr(C, "R4_GATE_SOFT", 0.0))  # 0=硬，>0=软缩放
+            soft = float(getattr(C, "R4_GATE_SOFT", 0.0))  # 0=硬，>0=软缩�?
             if float(R4) < tau:
                 if soft <= 0.0:
                     self.last_r4_gate_hit[drone_id] = True
@@ -831,7 +991,7 @@ class CentralServer:
                         float(R2),
                         float(R3),
                         float(R4),
-                    )  # 硬拒绝：直接给极小信誉，保持返回格式一致
+                    )  # 硬拒绝：直接给极小信誉，保持返回格式一�?
                 shrink = max(0.0, float(R4) / max(tau, 1e-12))
                 r4_shrink = max(eps, shrink)
         self.last_r4_gate_hit[drone_id] = r4_shrink < 0.999

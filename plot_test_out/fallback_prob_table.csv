@@ -1,0 +1,7 @@
+attack,dt_level,mal_nodes,tau_gate,fallback_prob,fallback_prob_std,fallback_prob_ci95,count
+label_flip,D0,0,0.3,0.0,0.0,0.0,1
+label_flip,D0,0,0.4,0.0,0.0,0.0,1
+label_flip,D0,0,0.5,0.0,0.0,0.0,1
+label_flip,D0,0,0.6,0.0,0.0,0.0,1
+label_flip,D0,0,0.7,0.0,0.0,0.0,1
+label_flip,D0,0,0.8,0.0,0.0,0.0,1

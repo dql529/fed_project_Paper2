@@ -1,38 +1,41 @@
-"""
-paper_figs.py
+﻿from __future__ import annotations
 
-Generate the 4 paper figures from CSV artifacts.
-
-Expected inputs:
-  - summary.csv : grouped mean/std (from r4_agg_minitest.py)
-  - rounds.csv  : per-round W_mal logs (from r4_agg_minitest.py; weighted only)
-  - nodes.csv   : per-node final rep/R2/R3/R4 logs (from r4_agg_minitest.py; weighted only)
-  - ablation_summary.csv (optional) : grouped mean/std for ablation runs
-
-Example:
-  python paper_figs.py --dt D1
-
-If you have ablation files:
-  python r4_agg_minitest.py --attack-modes dt_logit_scale --dt-levels D1 --mal-nodes 0,3,5 \\
-    --methods weighted_full,weighted_r4only,weighted_r2only,weighted_nogate \\
-    --out-runs ablation_runs.csv --out-summary ablation_summary.csv
-  python paper_figs.py --dt D1 --ablation-summary ablation_summary.csv
-"""
-
-from __future__ import annotations
+"""Generate paper/appendix figures from CSV artifacts."""
 
 import argparse
 from pathlib import Path
+import pandas as pd
+from typing import List, Optional
 
 from dt_r4.plotting import (
     load_nodes_csv,
     load_rounds_csv,
     load_summary_csv,
+    parse_csv_list,
+    validate_plot_inputs,
+    plot_adaptive_mimic_vs_lambda,
     plot_ablation_multiattack,
+    plot_auditsize_sensitivity,
     plot_clean_holdout_vs_f,
+    plot_cleanf1_vs_tau,
+    plot_fp_benign_vs_tau,
+    plot_passrate_vs_round,
     plot_r4_distribution,
+    plot_refsize_sensitivity,
+    plot_sdt_vs_round,
     plot_wmal_vs_round,
+    plot_wmal_vs_tau,
+    plot_fallback_prob_table,
 )
+
+
+def _parse_int_csv_list(values: str | None) -> Optional[List[int]]:
+    if values is None:
+        return None
+    parsed = parse_csv_list(values)
+    if parsed is None:
+        return None
+    return [int(x) for x in parsed]
 
 
 def main():
@@ -40,97 +43,259 @@ def main():
     ap.add_argument(
         "--figs",
         type=str,
-        default="1,2,3,4",
-        help="Comma list of figure indices to generate (e.g., 1,2,3,4 or 1,4)",
+        default="1,2,3,4,5,6,7,8,9",
+        help="Comma list of figure indices to generate (1-9)",
     )
     ap.add_argument("--dt", type=str, default="D1", help="DT level to plot (D0/D1/D2)")
     ap.add_argument("--summary", type=str, default="summary.csv")
     ap.add_argument("--rounds", type=str, default="rounds.csv")
     ap.add_argument("--nodes", type=str, default="nodes.csv")
-    ap.add_argument("--ablation-summary", type=str, default=None)
-    ap.add_argument(
-        "--ablation-attacks",
-        type=str,
-        default="label_flip,dt_logit_scale",
-        help="Comma list of attacks to include in Fig.4 ablation",
-    )
-    ap.add_argument("--out-dir", type=str, default="paper_figs")
-
+    ap.add_argument("--runs", type=str, default="runs.csv")
     ap.add_argument(
         "--mal-nodes",
         type=str,
         default="0,3,5",
-        help="Comma list for x-axis f (malicious clients)",
+        help="Comma list of malicious client counts",
     )
     ap.add_argument(
         "--methods",
         type=str,
         default="weighted,mean,median,trimmed_mean",
-        help="Comma list of baseline methods for Fig.1",
+        help="Comma list of methods",
     )
-    ap.add_argument("--f-fig2", type=int, default=5, help="f (mal nodes) for Fig.2")
-    ap.add_argument("--f-fig3", type=int, default=5, help="f (mal nodes) for Fig.3")
+    ap.add_argument(
+        "--attacks",
+        type=str,
+        default="label_flip,stealth_amp,dt_logit_scale,adaptive_mimic",
+        help="Comma list of attacks",
+    )
+    ap.add_argument(
+        "--f-fig2",
+        type=int,
+        default=5,
+        help="f (malicious clients) for Fig.2-like curve",
+    )
+    ap.add_argument(
+        "--f-sdt",
+        type=int,
+        default=5,
+        help="f (malicious clients) for S_DT curves",
+    )
+    ap.add_argument(
+        "--out-dir",
+        type=str,
+        default="paper_figs",
+        help="Output directory",
+    )
+    ap.add_argument(
+        "--ablation-attacks",
+        type=str,
+        default="label_flip,dt_logit_scale",
+        help="Attacks in fig4 ablation",
+    )
+    ap.add_argument(
+        "--tau-gate",
+        type=float,
+        default=None,
+        help="Optional tau filter for sensitivity plots",
+    )
+    ap.add_argument(
+        "--lambda-m",
+        type=float,
+        default=None,
+        help="Optional adaptive-mimic lambda filter",
+    )
+    ap.add_argument(
+        "--ref-size",
+        type=int,
+        default=None,
+        help="Optional |X_ref| filter",
+    )
+    ap.add_argument(
+        "--audit-size",
+        type=int,
+        default=None,
+        help="Optional audit size filter",
+    )
     args = ap.parse_args()
 
-    dt = str(args.dt).strip()
+    figs = {int(x.strip()) for x in args.figs.split(",") if x.strip()}
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    figs = {int(x.strip()) for x in args.figs.split(",") if x.strip()}
-    mal_nodes = [int(x.strip()) for x in args.mal_nodes.split(",") if x.strip()]
-    methods = [m.strip() for m in args.methods.split(",") if m.strip()]
+    summary_df = load_summary_csv(args.summary)
+    rounds_df = load_rounds_csv(args.rounds)
+    nodes_df = load_nodes_csv(args.nodes)
+    runs_df = pd.read_csv(args.runs) if args.runs else pd.DataFrame()
+    dt = str(args.dt).strip().upper()
 
-    # Fig.1: clean holdout macro-F1 vs f (3 attacks; 3 subplots)
+    attacks = parse_csv_list(args.attacks) or ["label_flip", "stealth_amp", "dt_logit_scale", "adaptive_mimic"]
+    methods = parse_csv_list(args.methods) or ["weighted", "mean", "median", "trimmed_mean"]
+    mal_nodes = _parse_int_csv_list(args.mal_nodes) or [0, 3, 5]
+
+    validate_plot_inputs(
+        summary_df=summary_df,
+        rounds_df=rounds_df,
+        nodes_df=nodes_df,
+        runs_df=runs_df,
+        attacks=attacks,
+        methods=methods,
+        mal_nodes=mal_nodes,
+        dt_levels=[dt],
+    )
+
+    # --- Figure 1: clean holdout macro-F1 vs f ---
     if 1 in figs:
-        summary_df = load_summary_csv(args.summary)
+        fig1 = out_dir / f"Fig1_cleanF1_vs_f_dt{dt}.png"
         plot_clean_holdout_vs_f(
             summary_df,
             attacks=["label_flip", "stealth_amp", "dt_logit_scale"],
             methods=methods,
             dt_level=dt,
             mal_nodes=mal_nodes,
-            out_path=out_dir / f"Fig1_cleanF1_vs_f_dt{dt}.png",
+            out_path=str(fig1),
             metric="clean_f1",
-            label_flip_level="L1",
         )
 
-    # Fig.2: W_mal vs round (focus f=5) for dt_logit_scale + label_flip
+    # --- Figure 2: W_mal vs round ---
     if 2 in figs:
-        rounds_df = load_rounds_csv(args.rounds)
+        fig2 = out_dir / f"Fig2_Wmal_vs_round_dt{dt}_f{args.f_fig2}.png"
         plot_wmal_vs_round(
             rounds_df,
             dt_level=dt,
             mal_nodes=int(args.f_fig2),
             attacks=["label_flip", "dt_logit_scale"],
-            out_path=out_dir / f"Fig2_Wmal_vs_round_dt{dt}_f{int(args.f_fig2)}.png",
+            out_path=str(fig2),
             method="weighted",
-            label_flip_level="L1",
         )
 
-    # Fig.3: R4/KL distribution (dt_logit_scale) benign vs malicious
+    # --- Figure 3: R4 distribution ---
     if 3 in figs:
-        nodes_df = load_nodes_csv(args.nodes)
+        fig3 = out_dir / f"Fig3_R4_distribution_dt{dt}_f{mal_nodes[0] if mal_nodes else 5}.png"
         plot_r4_distribution(
             nodes_df,
             attack="dt_logit_scale",
             dt_level=dt,
-            mal_nodes=int(args.f_fig3),
-            out_path=out_dir / f"Fig3_R4_distribution_dt{dt}_f{int(args.f_fig3)}.png",
+            mal_nodes=int(mal_nodes[0]) if mal_nodes else 5,
+            out_path=str(fig3),
             method="weighted",
+        )
+
+    # --- Figure 4: ablation ---
+    if 4 in figs:
+        ab_attacks = [x.strip() for x in args.ablation_attacks.split(",") if x.strip()]
+        fig4 = out_dir / f"Fig4_ablation_dt{dt}.png"
+        plot_ablation_multiattack(
+            summary_df,
+            dt_level=dt,
+            attacks=ab_attacks,
+            out_path=str(fig4),
+            mal_nodes=mal_nodes,
+            metric="polluted_f1",
+        )
+
+    # --- Figure 5: S_DT traces + fallback probability table ---
+    if 5 in figs:
+        fig5 = out_dir / f"Fig5_SDT_vs_round_dt{dt}_f{args.f_sdt}.png"
+        plot_sdt_vs_round(
+            rounds_df,
+            dt_level=dt,
+            mal_nodes=int(args.f_sdt),
+            attacks=attacks,
+            out_path=str(fig5),
+            methods=["weighted"],
+        )
+
+        fallback_table = plot_fallback_prob_table(
+            runs_df if not runs_df.empty else summary_df,
+            attacks=attacks,
+            dt_levels=[dt],
+            methods=["weighted"],
+            out_path=str(out_dir / f"Fig5_fallback_prob_dt{dt}.csv"),
+        )
+        if not fallback_table.empty:
+            fallback_table.to_csv(out_dir / f"Fig5_fallback_prob_dt{dt}.csv", index=False)
+
+    # --- Figure 6: tau sensitivity ---
+    if 6 in figs:
+        plot_cleanf1_vs_tau(
+            summary_df,
+            out_path=str(out_dir / f"Fig6_cleanF1_vs_tau_dt{dt}.png"),
+            attacks=["label_flip", "stealth_amp", "dt_logit_scale", "adaptive_mimic"],
+            dt_levels=[dt],
+            methods=["weighted"],
+            label_flip_level="L1",
+            metric="clean_f1",
+        )
+        plot_wmal_vs_tau(
+            summary_df,
+            out_path=str(out_dir / f"Fig6_Wmal_vs_tau_dt{dt}.png"),
+            attacks=["label_flip", "stealth_amp", "dt_logit_scale", "adaptive_mimic"],
+            dt_levels=[dt],
+            methods=["weighted"],
+            label_flip_level="L1",
+        )
+        plot_fp_benign_vs_tau(
+            summary_df,
+            out_path=str(out_dir / f"Fig6_FPerr_vs_tau_dt{dt}.png"),
+            attacks=["label_flip", "stealth_amp", "dt_logit_scale", "adaptive_mimic"],
+            dt_levels=[dt],
+            methods=["weighted"],
             label_flip_level="L1",
         )
 
-    # Fig.4: Ablation (dt_logit_scale) if the file is provided
-    if 4 in figs and args.ablation_summary:
-        ab_sum = load_summary_csv(args.ablation_summary)
-        attacks = [x.strip() for x in args.ablation_attacks.split(",") if x.strip()]
-        plot_ablation_multiattack(
-            ab_sum,
+    # --- Figure 7: pass-rate curves over rounds ---
+    if 7 in figs:
+        plot_passrate_vs_round(
+            rounds_df,
             dt_level=dt,
+            mal_nodes=int(args.f_fig2),
             attacks=attacks,
-            out_path=out_dir / f"Fig4_ablation_dt{dt}.png",
+            out_path=str(out_dir / f"Fig7_passrate_vs_round_dt{dt}_f{args.f_fig2}.png"),
+            method="weighted",
+            metric="benign_pass_rate",
+        )
+
+    # --- Figure 8: ref-size and audit-size sensitivity ---
+    if 8 in figs:
+        plot_refsize_sensitivity(
+            summary_df,
+            out_dir=str(out_dir / "tau_refsize"),
+            prefix=f"Fig8_dt{dt}_f{args.f_fig2}",
+            attacks=["label_flip", "stealth_amp", "dt_logit_scale", "adaptive_mimic"],
+            dt_levels=[dt],
+            mal_nodes=[args.f_fig2],
+            methods=["weighted"],
+            fixed_tau=args.tau_gate,
+            fixed_lambda=args.lambda_m,
+            fixed_audit_size=args.audit_size,
+        )
+        plot_auditsize_sensitivity(
+            summary_df,
+            out_dir=str(out_dir / "tau_auditsize"),
+            prefix=f"Fig8_dt{dt}_f{args.f_fig2}",
+            attacks=["label_flip", "stealth_amp", "dt_logit_scale", "adaptive_mimic"],
+            dt_levels=[dt],
+            mal_nodes=[args.f_fig2],
+            methods=["weighted"],
+            fixed_tau=args.tau_gate,
+            fixed_lambda=args.lambda_m,
+            fixed_ref_size=args.ref_size,
+        )
+
+    # --- Figure 9: adaptive mimic ----
+    if 9 in figs:
+        run_df = pd.read_csv(args.runs) if args.runs else pd.DataFrame()
+        plot_adaptive_mimic_vs_lambda(
+            run_df,
+            nodes_df=nodes_df,
+            dt_level=dt,
+            out_dir=str(out_dir / "adaptive_mimic"),
             mal_nodes=mal_nodes,
-            metric="polluted_f1",
+            method="weighted",
+            fixed_ref_size=args.ref_size,
+            fixed_audit_size=args.audit_size,
+            out_prefix=f"Fig9_dt{dt}",
         )
 
 

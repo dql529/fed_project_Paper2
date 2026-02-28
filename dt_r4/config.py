@@ -9,6 +9,13 @@ from __future__ import annotations
 # ---------------------------------------------------------------------------
 # 基本与场景
 # ---------------------------------------------------------------------------
+DT_SUPPORT_MIN = 10
+DT_REF_SIZE_CANDIDATES = [32, 64, 128, 256, 512]
+R2_AUDIT_SIZE_CANDIDATES = [0, 32, 64, 128, 256]
+ADAPTIVE_MIMIC_LAMBDAS = [0.1, 1, 10]
+TAU_SENSITIVITY_GRID = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+GEO_FALLBACK_AGG = "mean"
+SERVER_VAL_EPS = 1e-12
 NUM_NODES = 10
 MALICIOUS_NODES = 3
 SEED_LIST = list(range(2))
