@@ -1,0 +1,1 @@
+r4_agg_minitest.py --attack-modes label_flip,stealth_amp,dt_logit_scale --dt-levels D0 --mal-nodes 0,3,5 --methods weighted,mean,median,trimmed_mean,server_val --seeds 0,1,2,3,4

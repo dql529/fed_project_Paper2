@@ -1,0 +1,10 @@
+attack_mode,attack,level,dt_level,mal_nodes,method,tau_gate,lambda_m,ref_size,audit_size,benign_pass_rate_m,benign_pass_rate_s,malicious_pass_rate_m,malicious_pass_rate_s,count
+dt_logit_scale,dt_logit_scale,,D0,0,server_val,0.7,0.0,512,0,nan,nan,nan,nan,5
+dt_logit_scale,dt_logit_scale,,D0,3,server_val,0.7,0.0,512,0,nan,nan,nan,nan,5
+dt_logit_scale,dt_logit_scale,,D0,5,server_val,0.7,0.0,512,0,nan,nan,nan,nan,5
+label_flip,label_flip,L1,D0,0,server_val,0.7,0.0,512,0,nan,nan,nan,nan,5
+label_flip,label_flip,L1,D0,3,server_val,0.7,0.0,512,0,nan,nan,nan,nan,5
+label_flip,label_flip,L1,D0,5,server_val,0.7,0.0,512,0,nan,nan,nan,nan,5
+stealth_amp,stealth_amp,,D0,0,server_val,0.7,0.0,512,0,nan,nan,nan,nan,5
+stealth_amp,stealth_amp,,D0,3,server_val,0.7,0.0,512,0,nan,nan,nan,nan,5
+stealth_amp,stealth_amp,,D0,5,server_val,0.7,0.0,512,0,nan,nan,nan,nan,5

@@ -267,6 +267,57 @@ def _row_hashes(x: torch.Tensor, y: torch.Tensor, decimals: int = 6) -> set[str]
     }
 
 
+def _row_hashes_series(x: torch.Tensor, y: torch.Tensor, decimals: int = 6) -> List[str]:
+    if x is None or x.numel() == 0:
+        return []
+    x_np = x.detach().cpu().numpy()
+    y_np = y.detach().cpu().numpy().reshape(-1, 1)
+    payload = np.concatenate([x_np, y_np], axis=1)
+    payload = np.round(payload.astype(np.float32), decimals=decimals)
+    return [hashlib.md5(row.tobytes()).hexdigest() for row in payload]
+
+
+def _collect_node_hashes(node_data_objects) -> set[str]:
+    seen: set[str] = set()
+    for item in node_data_objects:
+        if item is None:
+            continue
+        train = getattr(item["train"], "x", None)
+        train_y = getattr(item["train"], "y", None)
+        test = getattr(item["test"], "x", None)
+        test_y = getattr(item["test"], "y", None)
+        if train is not None and train_y is not None:
+            seen |= _row_hashes(train, train_y)
+        if test is not None and test_y is not None:
+            seen |= _row_hashes(test, test_y)
+    return seen
+
+
+def _sample_disjoint_subset(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    allowed_indices: Sequence[int],
+    n: int,
+    seed: int,
+) -> tuple[torch.Tensor, torch.Tensor, List[int]]:
+    if x is None or x.numel() == 0:
+        return x[:0], y[:0], []
+    if n is None or int(n) <= 0:
+        return x[:0], y[:0], []
+    n_int = int(n)
+    if n_int <= 0:
+        return x[:0], y[:0], []
+    pool = list(allowed_indices)
+    if len(pool) == 0:
+        return x[:0], y[:0], []
+    g = torch.Generator(device=x.device)
+    g.manual_seed(int(seed))
+    k = min(n_int, len(pool))
+    perm = torch.randperm(len(pool), generator=g, device=x.device)[:k]
+    sel = torch.tensor([pool[int(i)] for i in perm.tolist()], device=x.device, dtype=torch.long)
+    return x[sel], y[sel], sel.tolist()
+
+
 def _overlap_size(left: set[str], right: set[str]) -> int:
     if not left or not right:
         return 0
@@ -432,7 +483,7 @@ def run_once(
 
     attack_mode = (meta or {}).get("attack", getattr(C, "MAL_ATTACK_MODE", "none"))
     dt_level = (meta or {}).get("dt_level", getattr(C, "_DT_ACTIVE_LEVEL", "D0"))
-    method_detail = str(meta or {}).get("method_detail", "")
+    method_detail = str((meta or {}).get("method_detail", ""))
     used_attack_mode = str(attack_mode)
     uses_dt = False
 
@@ -555,12 +606,26 @@ def run_once(
         )
 
         ref_x_full, ref_y_full = load_reference_data(C.GLOBAL_REF_CSV)
-        r4_ref_x, r4_ref_y = sample_reference_subset(
+        node_hashes = _collect_node_hashes(node_data_objects)
+        ref_hashes = _row_hashes_series(ref_x_full, ref_y_full)
+        disjoint_ref_indices = [i for i, h in enumerate(ref_hashes) if h not in node_hashes]
+        requested_ref_size = (
+            int(ref_size) if (ref_size is not None and int(ref_size) > 0) else len(disjoint_ref_indices)
+        )
+        if ref_size is not None and int(ref_size) > len(disjoint_ref_indices):
+            print(
+                f"[split] reference pool overlaps local data: requested ref_size={int(ref_size)} "
+                f"reduced to {len(disjoint_ref_indices)} disjoint samples"
+            )
+        requested_ref_size = min(int(requested_ref_size), len(disjoint_ref_indices))
+        r4_ref_x, r4_ref_y, r4_ref_selected_idx = _sample_disjoint_subset(
             ref_x_full,
             ref_y_full,
-            int(ref_size) if ref_size is not None else None,
-            seed=seed + 200,
+            disjoint_ref_indices,
+            requested_ref_size,
+            seed + 200,
         )
+        ref_selected_set = set(r4_ref_selected_idx)
 
         if dt_level is not None and (need_r4 or attack_mode == "adaptive_mimic"):
             dt_cfg = C.DT_MISMATCH_LEVELS.get(dt_level, C.DT_MISMATCH_LEVELS["D0"])
@@ -584,10 +649,24 @@ def run_once(
         if audit_size is not None:
             a_size = int(audit_size)
             if a_size > 0:
-                audit_x, audit_y = sample_audit_set(
-                    ref_x_full, ref_y_full, a_size, seed=seed + 300
-                )
-                audit_size_used = int(audit_x.shape[0])
+                disjoint_for_audit = [
+                    i for i in disjoint_ref_indices if i not in ref_selected_set
+                ]
+                if a_size > len(disjoint_for_audit):
+                    print(
+                        f"[split] audit pool overlaps local data: requested audit_size={a_size} "
+                        f"reduced to {len(disjoint_for_audit)} disjoint samples"
+                    )
+                audit_n = min(a_size, len(disjoint_for_audit))
+                if audit_n > 0:
+                    audit_x, audit_y, _ = _sample_disjoint_subset(
+                        ref_x_full,
+                        ref_y_full,
+                        disjoint_for_audit,
+                        audit_n,
+                        seed + 300,
+                    )
+                    audit_size_used = int(audit_x.shape[0])
 
         split_summary = _split_leakage_summary(
             node_data_objects, r4_ref_x, r4_ref_y, audit_x, audit_y
@@ -1308,6 +1387,12 @@ def _write_json(path: str, payload: Dict):
         json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
 
 
+def _write_text(path: str, payload: str) -> None:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(payload)
+
+
 def _coerce_exp_group_filter(raw: Optional[str]) -> List[str]:
     groups = [x.lower() for x in _normalize_cli_list(raw)]
     if not groups or "auto" in groups:
@@ -1340,11 +1425,23 @@ def _coerce_cli_floats(name: str, value: str, default: Sequence[float]) -> List[
 
 
 def main():
+    default_ref_sizes = list(
+        getattr(C, "DT_REF_SIZE_CANDIDATES", [32, 64, 128, 256, 512])
+    )
+    default_audit_sizes = list(
+        getattr(C, "R2_AUDIT_SIZE_CANDIDATES", [0, 32, 64, 128, 256])
+    )
+    default_ref_grid = (
+        default_ref_sizes[-1:] if default_ref_sizes else [32]
+    )
+    default_audit_grid = (
+        default_audit_sizes[:1] if default_audit_sizes else [0]
+    )
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--out-root",
         type=str,
-        default="out",
+        default="artifacts",
         help="Root output directory for grouped artifacts",
     )
     ap.add_argument(
@@ -1353,7 +1450,11 @@ def main():
         default="auto",
         help="Comma list of experiment groups: auto | base | sdt | tau | server_val | krum | mimic | refaudit",
     )
-    ap.add_argument("--methods", type=str, default="weighted,mean,median,trimmed_mean")
+    ap.add_argument(
+        "--methods",
+        type=str,
+        default="weighted,mean,median,trimmed_mean",
+    )
     ap.add_argument("--rounds", type=int, default=C.NUM_ROUNDS)
     ap.add_argument(
         "--deploy-variant",
@@ -1394,7 +1495,7 @@ def main():
     ap.add_argument(
         "--dt-levels",
         type=str,
-        default="D0,D1,D2",
+        default="D0",
         help="Comma list of DT fidelity levels (D0/D1/D2)",
     )
     ap.add_argument(
@@ -1406,15 +1507,8 @@ def main():
     ap.add_argument(
         "--tau-grid",
         type=str,
-        default=",".join(
-            str(x)
-            for x in getattr(
-                C,
-                "TAU_SENSITIVITY_GRID",
-                [0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
-            )
-        ),
-        help="Comma list of tau values",
+        default=str(getattr(C, "R4_GATE_TAU", 0.70)),
+        help="Comma list of tau values. For sensitivity sweep, pass explicit values.",
     )
     ap.add_argument(
         "--dt-support-min", type=int, default=getattr(C, "DT_SUPPORT_MIN", 10)
@@ -1430,28 +1524,16 @@ def main():
     ap.add_argument(
         "--ref-size-grid",
         type=str,
-        default=",".join(
-            str(x)
-            for x in getattr(
-                C,
-                "DT_REF_SIZE_CANDIDATES",
-                [32, 64, 128, 256, 512],
-            )
-        ),
-        help="Comma list of R4 reference subset sizes",
+        default=",".join(str(x) for x in default_ref_grid),
+        help="Comma list of R4 reference subset sizes. "
+        "For sensitivity sweep, pass explicit list.",
     )
     ap.add_argument(
         "--audit-size-grid",
         type=str,
-        default=",".join(
-            str(x)
-            for x in getattr(
-                C,
-                "R2_AUDIT_SIZE_CANDIDATES",
-                [0, 32, 64, 128, 256],
-            )
-        ),
-        help="Comma list of server audit set sizes",
+        default=",".join(str(x) for x in default_audit_grid),
+        help="Comma list of server audit set sizes. "
+        "For sensitivity sweep, pass explicit list.",
     )
     ap.add_argument("--out-runs", type=str, default=None)
     ap.add_argument("--out-summary", type=str, default=None)
@@ -1465,13 +1547,19 @@ def main():
     ap.add_argument(
         "--out-sensitivity-audit", type=str, default="sensitivity_summary_audit.csv"
     )
+    ap.add_argument(
+        "--allow-extra-attacks",
+        action="store_true",
+        default=False,
+        help="Permit backdoor/noise-ascent branches for non-paper experiments",
+    )
     args = ap.parse_args()
 
     exp_groups = _coerce_exp_group_filter(args.exp_group)
     methods = _normalize_cli_list(args.methods)
     attack_modes = _normalize_cli_list(args.attack_modes)
     mal_nodes_list = _coerce_cli_ints("mal-nodes", args.mal_nodes, [0, 1, 2, 3, 5])
-    seeds = _coerce_cli_ints("seeds", args.seeds, [0])
+    seeds = _coerce_cli_ints("seeds", args.seeds, list(getattr(C, "SEED_LIST", [0, 1, 2, 3, 4])))
     dt_levels = _normalize_cli_list(args.dt_levels) or ["D0"]
 
     if not methods:
@@ -1507,6 +1595,10 @@ def main():
         args.audit_size_grid,
         default=getattr(C, "R2_AUDIT_SIZE_CANDIDATES", [0, 32, 64, 128, 256]),
     )
+
+    if not args.allow_extra_attacks:
+        C.BACKDOOR_ATTACK_ENABLED = False
+        C.NOISE_ATTACK_PATH = None
 
     out_root = Path(args.out_root)
     out_root.mkdir(parents=True, exist_ok=True)
@@ -1964,6 +2056,7 @@ def main():
                 },
             },
         )
+        _write_text(str(group_dir / "command.txt"), " ".join(sys.argv))
 
         _write_csv(str(group_dir / "runs.csv"), g_runs, _collect_fieldnames(g_runs, runs_base_cols))
         _write_csv(

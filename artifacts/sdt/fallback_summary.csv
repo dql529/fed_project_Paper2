@@ -1,0 +1,1 @@
+attack_mode,attack,level,dt_level,mal_nodes,method,tau_gate,lambda_m,ref_size,audit_size,fallback_rate_m,fallback_rate_s,benign_pass_rate_m,benign_pass_rate_s,malicious_pass_rate_m,malicious_pass_rate_s,benign_admitted_weight_mass_m,benign_admitted_weight_mass_s,count

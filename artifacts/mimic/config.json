@@ -1,0 +1,147 @@
+{
+  "command": "r4_agg_minitest.py --attack-modes label_flip,stealth_amp,dt_logit_scale --dt-levels D0 --mal-nodes 0,3,5 --methods weighted,mean,median,trimmed_mean,server_val --seeds 0,1,2,3,4",
+  "deploy_variant": 1,
+  "dt_support_min": 10,
+  "fallback_mode": "median",
+  "group": "mimic",
+  "group_runs": 0,
+  "rounds": 15,
+  "scenario": "A",
+  "schema": {
+    "required_nodes": [
+      "attack_mode",
+      "attack",
+      "level",
+      "dt_level",
+      "mal_nodes",
+      "method",
+      "seed",
+      "round",
+      "node_id",
+      "is_malicious",
+      "R4",
+      "KL_q_p",
+      "Rep",
+      "passed_gate",
+      "pi",
+      "R2",
+      "R2_source",
+      "method_detail",
+      "uses_dt",
+      "mimic_attack_enabled",
+      "mimic_loss",
+      "poison_loss",
+      "final_kl_to_teacher",
+      "exp_group"
+    ],
+    "required_rounds": [
+      "attack_mode",
+      "attack",
+      "level",
+      "dt_level",
+      "mal_nodes",
+      "method",
+      "seed",
+      "round",
+      "tau_gate",
+      "lambda_m",
+      "ref_size",
+      "audit_size",
+      "S_DT",
+      "S_DT_ratio",
+      "num_masked",
+      "num_valid",
+      "valid_ratio",
+      "fallback_flag",
+      "fallback_method",
+      "skip_semantic",
+      "W_mal",
+      "benign_pass_rate",
+      "malicious_pass_rate",
+      "benign_admitted_weight_mass",
+      "uses_dt",
+      "method_detail"
+    ],
+    "required_runs": [
+      "attack_mode",
+      "attack",
+      "level",
+      "dt_level",
+      "mal_nodes",
+      "method",
+      "seed",
+      "tau_gate",
+      "lambda_m",
+      "ref_size",
+      "audit_size",
+      "skipped",
+      "skip_reason",
+      "polluted_acc",
+      "polluted_f1",
+      "clean_acc",
+      "clean_f1",
+      "w_mal",
+      "w_mal_round_mean",
+      "S_DT",
+      "S_DT_ratio",
+      "valid_ratio",
+      "fallback_rate",
+      "fallback_flag_first",
+      "fallback_flag_final",
+      "fallback_method",
+      "skip_semantic",
+      "num_masked",
+      "num_valid",
+      "benign_pass_rate",
+      "malicious_pass_rate",
+      "benign_admitted_weight_mass",
+      "uses_dt",
+      "method_detail",
+      "mimic_loss",
+      "poison_loss",
+      "final_kl_to_teacher",
+      "exp_group"
+    ]
+  },
+  "selected_adaptive_mimic_lambdas": [
+    0.1,
+    1.0,
+    10.0
+  ],
+  "selected_attack_modes": [
+    "label_flip",
+    "stealth_amp",
+    "dt_logit_scale"
+  ],
+  "selected_audit_size_grid": [
+    0
+  ],
+  "selected_dt_levels": [
+    "D0"
+  ],
+  "selected_mal_nodes": [
+    0,
+    3,
+    5
+  ],
+  "selected_methods": [
+    "weighted",
+    "mean",
+    "median",
+    "trimmed_mean",
+    "server_val"
+  ],
+  "selected_ref_size_grid": [
+    512
+  ],
+  "selected_seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "selected_tau_grid": [
+    0.7
+  ]
+}

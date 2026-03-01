@@ -46,11 +46,15 @@ def main():
         default="1,2,3,4,5,6,7,8,9",
         help="Comma list of figure indices to generate (1-9)",
     )
-    ap.add_argument("--dt", type=str, default="D1", help="DT level to plot (D0/D1/D2)")
-    ap.add_argument("--summary", type=str, default="summary.csv")
-    ap.add_argument("--rounds", type=str, default="rounds.csv")
-    ap.add_argument("--nodes", type=str, default="nodes.csv")
-    ap.add_argument("--runs", type=str, default="runs.csv")
+    ap.add_argument(
+        "--dt", type=str, default="D0", help="DT level to plot (D0/D1/D2)"
+    )
+    ap.add_argument("--artifacts-root", type=str, default="artifacts")
+    ap.add_argument("--exp-group", type=str, default="base")
+    ap.add_argument("--summary", type=str, default="")
+    ap.add_argument("--rounds", type=str, default="")
+    ap.add_argument("--nodes", type=str, default="")
+    ap.add_argument("--runs", type=str, default="")
     ap.add_argument(
         "--mal-nodes",
         type=str,
@@ -66,7 +70,7 @@ def main():
     ap.add_argument(
         "--attacks",
         type=str,
-        default="label_flip,stealth_amp,dt_logit_scale,adaptive_mimic",
+        default="label_flip,stealth_amp,dt_logit_scale",
         help="Comma list of attacks",
     )
     ap.add_argument(
@@ -82,9 +86,15 @@ def main():
         help="f (malicious clients) for S_DT curves",
     )
     ap.add_argument(
+        "--f-fig3",
+        type=int,
+        default=5,
+        help="f (malicious clients) for Fig.3 R4 distribution",
+    )
+    ap.add_argument(
         "--out-dir",
         type=str,
-        default="paper_figs",
+        default="",
         help="Output directory",
     )
     ap.add_argument(
@@ -120,17 +130,31 @@ def main():
     args = ap.parse_args()
 
     figs = {int(x.strip()) for x in args.figs.split(",") if x.strip()}
-    out_dir = Path(args.out_dir)
+    group_root = Path(args.artifacts_root) / args.exp_group
+    out_dir = Path(
+        args.out_dir
+        if args.out_dir
+        else str(Path(args.artifacts_root) / "paper" / args.exp_group)
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    summary_df = load_summary_csv(args.summary)
-    rounds_df = load_rounds_csv(args.rounds)
-    nodes_df = load_nodes_csv(args.nodes)
-    runs_df = pd.read_csv(args.runs) if args.runs else pd.DataFrame()
+    def _resolve_csv_path(arg_value: str, filename: str) -> str:
+        return arg_value if arg_value else str(group_root / filename)
+
+    summary_df = load_summary_csv(_resolve_csv_path(args.summary, "summary.csv"))
+    rounds_df = load_rounds_csv(_resolve_csv_path(args.rounds, "rounds.csv"))
+    nodes_df = load_nodes_csv(_resolve_csv_path(args.nodes, "nodes.csv"))
+    runs_source = _resolve_csv_path(args.runs, "runs.csv")
+    runs_df = pd.read_csv(runs_source) if Path(runs_source).exists() else pd.DataFrame()
     dt = str(args.dt).strip().upper()
 
-    attacks = parse_csv_list(args.attacks) or ["label_flip", "stealth_amp", "dt_logit_scale", "adaptive_mimic"]
-    methods = parse_csv_list(args.methods) or ["weighted", "mean", "median", "trimmed_mean"]
+    attacks = parse_csv_list(args.attacks) or ["label_flip", "stealth_amp", "dt_logit_scale"]
+    methods = parse_csv_list(args.methods) or [
+        "weighted",
+        "mean",
+        "median",
+        "trimmed_mean",
+    ]
     mal_nodes = _parse_int_csv_list(args.mal_nodes) or [0, 3, 5]
 
     validate_plot_inputs(
@@ -171,12 +195,13 @@ def main():
 
     # --- Figure 3: R4 distribution ---
     if 3 in figs:
-        fig3 = out_dir / f"Fig3_R4_distribution_dt{dt}_f{mal_nodes[0] if mal_nodes else 5}.png"
+        fig3_f = int(args.f_fig3)
+        fig3 = out_dir / f"Fig3_R4_distribution_dt{dt}_f{fig3_f}.png"
         plot_r4_distribution(
             nodes_df,
             attack="dt_logit_scale",
             dt_level=dt,
-            mal_nodes=int(mal_nodes[0]) if mal_nodes else 5,
+            mal_nodes=fig3_f,
             out_path=str(fig3),
             method="weighted",
         )
@@ -221,7 +246,7 @@ def main():
         plot_cleanf1_vs_tau(
             summary_df,
             out_path=str(out_dir / f"Fig6_cleanF1_vs_tau_dt{dt}.png"),
-            attacks=["label_flip", "stealth_amp", "dt_logit_scale", "adaptive_mimic"],
+            attacks=attacks,
             dt_levels=[dt],
             methods=["weighted"],
             label_flip_level="L1",
@@ -230,7 +255,7 @@ def main():
         plot_wmal_vs_tau(
             summary_df,
             out_path=str(out_dir / f"Fig6_Wmal_vs_tau_dt{dt}.png"),
-            attacks=["label_flip", "stealth_amp", "dt_logit_scale", "adaptive_mimic"],
+            attacks=attacks,
             dt_levels=[dt],
             methods=["weighted"],
             label_flip_level="L1",
@@ -238,7 +263,7 @@ def main():
         plot_fp_benign_vs_tau(
             summary_df,
             out_path=str(out_dir / f"Fig6_FPerr_vs_tau_dt{dt}.png"),
-            attacks=["label_flip", "stealth_amp", "dt_logit_scale", "adaptive_mimic"],
+            attacks=attacks,
             dt_levels=[dt],
             methods=["weighted"],
             label_flip_level="L1",
@@ -262,7 +287,7 @@ def main():
             summary_df,
             out_dir=str(out_dir / "tau_refsize"),
             prefix=f"Fig8_dt{dt}_f{args.f_fig2}",
-            attacks=["label_flip", "stealth_amp", "dt_logit_scale", "adaptive_mimic"],
+            attacks=attacks,
             dt_levels=[dt],
             mal_nodes=[args.f_fig2],
             methods=["weighted"],
@@ -274,7 +299,7 @@ def main():
             summary_df,
             out_dir=str(out_dir / "tau_auditsize"),
             prefix=f"Fig8_dt{dt}_f{args.f_fig2}",
-            attacks=["label_flip", "stealth_amp", "dt_logit_scale", "adaptive_mimic"],
+            attacks=attacks,
             dt_levels=[dt],
             mal_nodes=[args.f_fig2],
             methods=["weighted"],
@@ -286,17 +311,18 @@ def main():
     # --- Figure 9: adaptive mimic ----
     if 9 in figs:
         run_df = pd.read_csv(args.runs) if args.runs else pd.DataFrame()
-        plot_adaptive_mimic_vs_lambda(
-            run_df,
-            nodes_df=nodes_df,
-            dt_level=dt,
-            out_dir=str(out_dir / "adaptive_mimic"),
-            mal_nodes=mal_nodes,
-            method="weighted",
-            fixed_ref_size=args.ref_size,
-            fixed_audit_size=args.audit_size,
-            out_prefix=f"Fig9_dt{dt}",
-        )
+        if "adaptive_mimic" in attacks:
+            plot_adaptive_mimic_vs_lambda(
+                run_df,
+                nodes_df=nodes_df,
+                dt_level=dt,
+                out_dir=str(out_dir / "adaptive_mimic"),
+                mal_nodes=mal_nodes,
+                method="weighted",
+                fixed_ref_size=args.ref_size,
+                fixed_audit_size=args.audit_size,
+                out_prefix=f"Fig9_dt{dt}",
+            )
 
 
 if __name__ == "__main__":

@@ -31,7 +31,6 @@ def load_nodes_csv(path: str) -> pd.DataFrame:
 
 DT_LEVELS = {"D0", "D1", "D2"}
 SUMMARY_REQUIRED_COLUMNS = {
-    "seed",
     "attack",
     "method",
     "dt_level",

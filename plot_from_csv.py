@@ -2,15 +2,16 @@
 Standalone plotting entrypoint.
 
 Usage (default paths):
-  python plot_from_csv.py
+  python plot_from_csv.py --exp-group base
 
 Custom:
-  python plot_from_csv.py --runs runs.csv --summary summary.csv --out-dir plots
+  python plot_from_csv.py --summary artifacts/base/summary.csv --runs artifacts/base/runs.csv --out-dir plots
 """
 
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import dt_r4.config as C
 from dt_r4.plotting import make_plots_from_csv, parse_csv_list
@@ -32,11 +33,21 @@ def _parse_float_list_csv(value: str | None):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--runs", type=str, default="runs.csv", help="Path to runs.csv")
+    ap.add_argument("--artifacts-root", type=str, default="artifacts")
+    ap.add_argument("--exp-group", type=str, default="base")
+    ap.add_argument("--runs", type=str, default="", help="Path to runs.csv")
     ap.add_argument(
-        "--summary", type=str, default="summary.csv", help="Path to summary.csv"
+        "--summary",
+        type=str,
+        default="",
+        help="Path to summary.csv",
     )
-    ap.add_argument("--out-dir", type=str, default=".", help="Output directory")
+    ap.add_argument(
+        "--out-dir",
+        type=str,
+        default="",
+        help="Output directory",
+    )
     ap.add_argument(
         "--tau",
         type=float,
@@ -106,11 +117,20 @@ def main():
     ap.add_argument(
         "--metric",
         type=str,
-        default="polluted_f1",
-        choices=["polluted_f1", "polluted_acc"],
+        default="clean_f1",
+        choices=["clean_f1", "clean_acc", "polluted_f1", "polluted_acc"],
         help="Y metric for clean_holdout-like plot",
     )
     args = ap.parse_args()
+
+    artifact_root = Path(args.artifacts_root)
+    group_root = artifact_root / args.exp_group
+
+    def _resolve_csv_path(arg_value: str, filename: str) -> str:
+        return arg_value if arg_value else str(group_root / filename)
+
+    if not args.out_dir:
+        args.out_dir = str(artifact_root / "paper" / args.exp_group)
 
     attacks = (
         parse_csv_list(args.attacks)
@@ -135,8 +155,12 @@ def main():
     )
 
     make_plots_from_csv(
-        runs_csv=args.runs,
-        summary_csv=args.summary,
+        runs_csv=(
+            _resolve_csv_path(args.runs, "runs.csv")
+            if Path(_resolve_csv_path(args.runs, "runs.csv")).exists()
+            else ""
+        ),
+        summary_csv=_resolve_csv_path(args.summary, "summary.csv"),
         out_dir=args.out_dir,
         attacks=attacks,
         methods=methods,

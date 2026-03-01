@@ -1,0 +1,1 @@
+attack_mode,attack,level,dt_level,mal_nodes,method,seed,round,tau_gate,lambda_m,ref_size,audit_size,S_DT,S_DT_ratio,num_masked,num_valid,valid_ratio,fallback_flag,fallback_method,skip_semantic,W_mal,benign_pass_rate,malicious_pass_rate,benign_admitted_weight_mass,uses_dt,method_detail
