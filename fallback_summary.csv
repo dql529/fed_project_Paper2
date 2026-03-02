@@ -1,7 +1,0 @@
-attack,level,dt_level,mal_nodes,method,tau_gate,lambda_m,ref_size,audit_size,fallback_rate_m,fallback_rate_s,benign_pass_rate_m,benign_pass_rate_s,malicious_pass_rate_m,malicious_pass_rate_s,benign_admitted_weight_mass_m,benign_admitted_weight_mass_s,count
-label_flip,L1,D0,0,weighted,0.3,0.0,32,0,0.0,0.0,1.0,0.0,nan,nan,1.0,0.0,1
-label_flip,L1,D0,0,weighted,0.4,0.0,32,0,0.0,0.0,1.0,0.0,nan,nan,1.0,0.0,1
-label_flip,L1,D0,0,weighted,0.5,0.0,32,0,0.0,0.0,1.0,0.0,nan,nan,1.0,0.0,1
-label_flip,L1,D0,0,weighted,0.6,0.0,32,0,0.0,0.0,0.0,0.0,nan,nan,1.0,0.0,1
-label_flip,L1,D0,0,weighted,0.7,0.0,32,0,0.0,0.0,0.0,0.0,nan,nan,1.0,0.0,1
-label_flip,L1,D0,0,weighted,0.8,0.0,32,0,0.0,0.0,0.0,0.0,nan,nan,1.0,0.0,1

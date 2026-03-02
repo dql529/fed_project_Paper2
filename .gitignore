@@ -1,0 +1,28 @@
+# IDE / cache
+/.vscode/
+/__pycache__/
+
+# old root-level outputs
+/plot_test_out/
+/paper_figs/
+/paper_test_figs/
+
+# temporary root-level files
+/1
+/summary.csv
+/runs.csv
+/rounds.csv
+/nodes.csv
+/fallback_summary.csv
+/passrate_summary.csv
+/sensitivity_summary_ref.csv
+/sensitivity_summary_audit.csv
+/summary_legacy.csv
+/tmp_fig23_runs.csv
+/tmp_fig23_summary.csv
+/tmp_fig3_runs.csv
+/tmp_fig3_summary.csv
+/ablation_runs.csv
+/ablation_summary.csv
+/fallback_prob_table.csv
+/large_model.pt

@@ -43,7 +43,7 @@ def main():
     ap.add_argument(
         "--figs",
         type=str,
-        default="1,2,3,4,5,6,7,8,9",
+        default="1,2,3,5,6,7,8,9",
         help="Comma list of figure indices to generate (1-9)",
     )
     ap.add_argument(
@@ -188,7 +188,7 @@ def main():
             rounds_df,
             dt_level=dt,
             mal_nodes=int(args.f_fig2),
-            attacks=["label_flip", "dt_logit_scale"],
+            attacks=["label_flip", "stealth_amp", "dt_logit_scale"],
             out_path=str(fig2),
             method="weighted",
         )
@@ -208,6 +208,9 @@ def main():
 
     # --- Figure 4: ablation ---
     if 4 in figs:
+        print(
+            "[warn] Figure 4 is deprecated from mainline; use Figure 4 only if explicitly requested."
+        )
         ab_attacks = [x.strip() for x in args.ablation_attacks.split(",") if x.strip()]
         fig4 = out_dir / f"Fig4_ablation_dt{dt}.png"
         plot_ablation_multiattack(
