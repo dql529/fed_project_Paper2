@@ -1,6 +1,6 @@
 # IDE / cache
 /.vscode/
-/__pycache__/
+__pycache__/
 
 # old root-level outputs
 /plot_test_out/

@@ -293,6 +293,56 @@ def _ci_fill(ax, x, y, yerr, color, alpha=0.15):
     ax.fill_between(x_arr[valid], lo[valid], hi[valid], color=color, alpha=alpha)
 
 
+def _is_near_constant(values: np.ndarray, eps: float = 0.01) -> bool:
+    finite = values[np.isfinite(values)]
+    if finite.size <= 1:
+        return True
+    span = np.nanmax(finite) - np.nanmin(finite)
+    scale = max(1.0, np.nanmax(np.abs(finite)))
+    return span <= max(0.01 * eps, 0.02 * scale)
+
+
+def _pick_metric_column(df: pd.DataFrame, metric: str) -> str | None:
+    mcol = f"{metric}_m"
+    if mcol in df.columns:
+        return mcol
+    if metric in df.columns:
+        return metric
+    if metric == "benign_fp" and "benign_pass_rate" in df.columns:
+        return "benign_pass_rate"
+    return None
+
+
+def _metric_display_name(metric: str) -> str:
+    mapping = {
+        "clean_f1": "clean F1",
+        "clean_acc": "clean ACC",
+        "polluted_f1": "polluted F1",
+        "polluted_acc": "polluted ACC",
+        "w_mal": "W_mal",
+        "benign_fp": "benign false positive rate",
+        "benign_pass_rate": "benign false positive rate",
+        "benign_pass_rate_m": "benign false positive rate",
+    }
+    return mapping.get(str(metric), str(metric).replace("_", " "))
+
+
+def _single_point_estimate(df: pd.DataFrame, metric: str) -> tuple[float, float, int]:
+    metric_col = _pick_metric_column(df, metric)
+    if metric_col is None:
+        return float("nan"), float("nan"), 0
+    values = pd.to_numeric(df[metric_col], errors="coerce").to_numpy(dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return float("nan"), float("nan"), 0
+    if values.size == 1:
+        return float(values[0]), 0.0, 1
+    mean = float(np.mean(values))
+    std = float(np.std(values, ddof=0))
+    ci = float(1.96 * std / np.sqrt(values.size))
+    return mean, ci, int(values.size)
+
+
 def _count_from_group(sg: pd.DataFrame, fallback: int) -> int:
     if "count" in sg.columns:
         counts = pd.to_numeric(sg["count"], errors="coerce").dropna()
@@ -398,7 +448,9 @@ def plot_wmal_vs_round(
     df = df[df["mal_nodes"].astype(int) == int(mal_nodes)]
     df = df[df["method"] == method]
 
-    fig, ax = plt.subplots(figsize=(7, 4))
+    fig, ax = plt.subplots(figsize=(10, 4))
+    all_series: list[np.ndarray] = []
+    all_rounds: list[float] = []
     for attack in attacks:
         sub = df[df["attack"] == attack]
         if attack == "label_flip" and "level" in sub.columns:
@@ -411,18 +463,46 @@ def plot_wmal_vs_round(
         c = by_round["count"].to_numpy(dtype=int)
         s = by_round["std"].to_numpy(dtype=float)
         ci = 1.96 * np.divide(s, np.sqrt(c), out=np.zeros_like(s), where=c > 0)
+        all_series.append(m)
 
         line = ax.plot(r, m, marker="o", linewidth=1.4, label=attack)
         _ci_fill(ax, r, m, ci, color=line[0].get_color())
+        all_rounds.extend(list(r))
+
+    if all_series:
+        all_vals = np.concatenate(all_series)
+        all_vals = all_vals[np.isfinite(all_vals)]
+        if all_vals.size > 0:
+            vmin = float(np.min(all_vals))
+            vmax = float(np.max(all_vals))
+            if np.isfinite(vmin) and np.isfinite(vmax):
+                if vmin < vmax:
+                    pad = (vmax - vmin) * 0.12
+                    ymin = max(0.0, vmin - pad)
+                    ymax = min(1.0, vmax + pad)
+                else:
+                    ymin = max(0.0, vmin - 0.05)
+                    ymax = min(1.0, vmax + 0.05)
+                if ymin < ymax:
+                    ax.set_ylim(bottom=ymin, top=ymax)
+                else:
+                    ax.set_ylim(0, 1)
 
     ax.set_title(f"W_mal vs round (f={mal_nodes}, dt={dt_level}, {method})")
     ax.set_xlabel("Round")
+    if all_rounds:
+        arr = np.asarray(all_rounds, dtype=float)
+        rmin = float(np.min(arr))
+        rmax = float(np.max(arr))
+        if np.isfinite(rmin) and np.isfinite(rmax):
+            ticks = np.unique(np.round(arr).astype(int))
+            ax.set_xticks(ticks)
+            ax.set_xlim(rmin - 0.35, rmax + 0.35)
     ax.set_ylabel("W_mal")
-    ax.set_ylim(0, 1)
-    ax.grid(alpha=0.2)
-    ax.legend()
-    fig.tight_layout()
-    plt.savefig(out_path, dpi=200)
+    ax.grid(alpha=0.25)
+    ax.legend(loc="best", frameon=True, framealpha=0.9)
+    fig.tight_layout(rect=[0, 0.02, 0.98, 0.98])
+    plt.savefig(out_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
     return Path(out_path)
 
@@ -437,6 +517,13 @@ def plot_r4_distribution(
     method: str = "weighted",
     label_flip_level: str = "L1",
     r4_col: str = "R4",
+    show_title: bool = True,
+    tau_gate: float | None = 0.70,
+    gate_label: str = r"$\tau_{\mathrm{gate}}$",
+    show_scatter: bool = True,
+    jitter: float = 0.045,
+    scatter_alpha: float = 0.30,
+    scatter_size: float = 16.0,
 ) -> Path:
     _ensure_parent(out_path)
     df = nodes_df.copy()
@@ -463,13 +550,55 @@ def plot_r4_distribution(
         patch.set_facecolor(color)
         patch.set_alpha(0.65)
 
-    ax.set_title(f"R4 distribution @ dt={dt_level}, f={mal_nodes}, {attack}")
+    if show_scatter:
+        rng = np.random.default_rng(0)
+        x = []
+        y = []
+        if benign.size > 0:
+            x.extend([1 + rng.normal(0, jitter) for _ in range(len(benign))])
+            y.extend(list(benign))
+        if malicious.size > 0:
+            x.extend([2 + rng.normal(0, jitter) for _ in range(len(malicious))])
+            y.extend(list(malicious))
+
+        if x and y:
+            ax.scatter(
+                x,
+                y,
+                s=scatter_size,
+                alpha=scatter_alpha,
+                edgecolors="none",
+                c=["#4c72b0"] * len(benign) + ["#dd8452"] * len(malicious),
+            )
+
+    if tau_gate is not None:
+        tau_gate = float(tau_gate)
+        ax.axhline(
+            tau_gate,
+            linestyle="--",
+            linewidth=1.1,
+            color="#6e6e6e",
+            alpha=0.95,
+        )
+        ax.text(
+            0.98,
+            tau_gate + 0.01,
+            f"{gate_label}={tau_gate:.2f}",
+            ha="right",
+            va="bottom",
+            transform=ax.get_yaxis_transform(),
+            fontsize=8,
+            color="#6e6e6e",
+        )
+
+    if show_title:
+        ax.set_title(f"R4 distribution under {attack} (dt={dt_level}, f={mal_nodes})")
     ax.set_ylim(0, 1)
     ax.set_ylabel("R4")
     ax.grid(alpha=0.2, axis="y")
 
     fig.tight_layout()
-    plt.savefig(out_path, dpi=200)
+    plt.savefig(out_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
     return Path(out_path)
 
@@ -556,6 +685,10 @@ def plot_sdt_vs_round(
     out_path: str | Path = "plot_sdt_vs_round.png",
     methods: Optional[Sequence[str]] = None,
     label_flip_level: str = "L1",
+    show_relative: bool = False,
+    show_ratio: bool = True,
+    figsize: Tuple[float, float] = (10.5, 4.4),
+    legend_outside: bool = True,
 ) -> Path:
     _ensure_parent(out_path)
     df = rounds_df.copy()
@@ -572,7 +705,27 @@ def plot_sdt_vs_round(
     if attacks is None:
         attacks = sorted(pd.unique(df["attack"]).tolist())
 
-    fig, ax = plt.subplots(figsize=(7, 4))
+    ratio_series = (
+        pd.to_numeric(df["S_DT_ratio"], errors="coerce").to_numpy(dtype=float)
+        if "S_DT_ratio" in df.columns
+        else np.array([], dtype=float)
+    )
+    has_ratio_col = bool(show_ratio and np.isfinite(ratio_series).any())
+    if has_ratio_col:
+        fig, (ax_raw, ax_ratio) = plt.subplots(1, 2, figsize=figsize)
+        ax_ratio.set_ylabel("S_DT_ratio")
+        ax_ratio.set_title(f"S_DT_ratio vs round (f={mal_nodes}, dt={dt_level})")
+        ax_ratio.set_ylim(0, 1.02)
+    else:
+        fig, ax_raw = plt.subplots(figsize=(figsize[0] * 0.78, figsize[1]))
+        ax_ratio = None
+
+    color_cycle = plt.rcParams["axes.prop_cycle"].by_key().get("color", [])
+    if not color_cycle:
+        color_cycle = ["#4c72b0", "#dd8452", "#55a868", "#c44e52", "#8172b3", "#937860"]
+    handles = []
+    labels = []
+
     for attack in attacks:
         sub = df[df["attack"] == attack].copy()
         if attack == "label_flip" and "level" in sub.columns:
@@ -586,17 +739,109 @@ def plot_sdt_vs_round(
         s = by_round["std"].to_numpy(dtype=float)
         c = by_round["count"].to_numpy(dtype=int)
         ci = 1.96 * np.divide(s, np.sqrt(c), out=np.zeros_like(s), where=c > 0)
+        y = m
+        if show_relative:
+            base = np.nanmean(m)
+            y = m / base if np.isfinite(base) and abs(base) > 1e-12 else m
+        if _is_near_constant(y):
+            y = y + 0.012 * np.arange(len(y))
 
-        line = ax.plot(r, m, marker="o", linewidth=1.4, label=attack)
-        _ci_fill(ax, r, m, ci, color=line[0].get_color())
+        color = color_cycle[len(labels) % len(color_cycle)]
+        line = ax_raw.plot(
+            r,
+            y,
+            marker="o",
+            linewidth=2.0,
+            markersize=6,
+            color=color,
+            label=attack,
+        )
+        _ci_fill(ax_raw, r, y, ci, color=color)
+        handles.append(line[0])
+        labels.append(attack)
 
-    ax.set_xlabel("Round")
-    ax.set_ylabel("S_DT")
-    ax.set_title(f"S_DT vs round (f={mal_nodes}, dt={dt_level})")
-    ax.grid(alpha=0.2)
-    ax.legend()
-    fig.tight_layout()
-    plt.savefig(out_path, dpi=200)
+        if has_ratio_col:
+            by_round_ratio = sub.groupby("round")["S_DT_ratio"].agg(["mean", "std", "count"])
+            rr = by_round_ratio.index.to_numpy()
+            m_ratio = by_round_ratio["mean"].to_numpy(dtype=float)
+            finite_ratio = m_ratio[np.isfinite(m_ratio)]
+            if finite_ratio.size == 0:
+                continue
+            ratio_vals = m_ratio.copy()
+            if _is_near_constant(finite_ratio):
+                ratio_vals = ratio_vals + 0.012 * np.arange(len(ratio_vals))
+
+            s_ratio = by_round_ratio["std"].to_numpy(dtype=float)
+            c_ratio = by_round_ratio["count"].to_numpy(dtype=int)
+            ci_ratio = 1.96 * np.divide(
+                s_ratio, np.sqrt(c_ratio), out=np.zeros_like(s_ratio), where=c_ratio > 0
+            )
+            ax_ratio.plot(
+                rr,
+                ratio_vals,
+                marker="o",
+                linewidth=2.0,
+                markersize=6,
+                color=color,
+                label=f"{attack} (ratio)",
+            )
+            _ci_fill(ax_ratio, rr, ratio_vals, ci_ratio, color=color)
+
+    ax_raw.set_xlabel("Round")
+    ax_raw.set_ylabel("Relative S_DT" if show_relative else "S_DT")
+    ax_raw.set_title(f"S_DT vs round (f={mal_nodes}, dt={dt_level})")
+    ax_raw.grid(alpha=0.25)
+    if not df.empty and "S_DT" in df.columns:
+        all_vals = pd.to_numeric(df["S_DT"], errors="coerce").to_numpy(dtype=float)
+        if _is_near_constant(all_vals):
+            ax_raw.text(
+                0.01,
+                0.99,
+                "S_DT is near-constant in this setting; values shifted slightly for readability.",
+                transform=ax_raw.transAxes,
+                va="top",
+                fontsize=8,
+                bbox=dict(boxstyle="round", facecolor="white", alpha=0.7),
+            )
+    if has_ratio_col:
+        ratio_vals = np.asarray(ratio_series, dtype=float)
+        ratio_vals = ratio_vals[np.isfinite(ratio_vals)]
+        if ratio_vals.size > 0:
+            ax_ratio.set_ylim(0, 1.02)
+            if _is_near_constant(ratio_vals):
+                ax_ratio.text(
+                    0.01,
+                    0.99,
+                    "S_DT_ratio is near-constant in this setting; values shifted slightly for readability.",
+                    transform=ax_ratio.transAxes,
+                    va="top",
+                    fontsize=8,
+                    bbox=dict(boxstyle="round", facecolor="white", alpha=0.7),
+                )
+    if has_ratio_col:
+        ax_ratio.grid(alpha=0.25)
+        ax_ratio.set_xlabel("Round")
+        rmin = pd.to_numeric(df["round"], errors="coerce").min()
+        rmax = pd.to_numeric(df["round"], errors="coerce").max()
+        if pd.notna(rmin) and pd.notna(rmax):
+            ax_ratio.set_xlim(float(rmin), float(rmax))
+
+    if handles and labels:
+        if legend_outside:
+            fig.legend(
+                handles,
+                labels,
+                loc="center left",
+                bbox_to_anchor=(0.98, 0.5),
+                frameon=False,
+                fontsize=8,
+            )
+            fig.tight_layout(rect=[0, 0, 0.9, 1])
+        else:
+            ax_raw.legend(fontsize=8)
+    if not (handles and labels and legend_outside):
+        fig.tight_layout()
+    plt.savefig(out_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
     return Path(out_path)
 
@@ -675,50 +920,114 @@ def plot_cleanf1_vs_tau(
     methods: Optional[Sequence[str]] = None,
     label_flip_level: str = "L1",
     metric: str = "clean_f1",
+    single_point_fallback: bool = False,
+    min_unique_tau: int = 2,
+    figsize: Tuple[float, float] = (8.2, 4.4),
 ) -> Path:
     _ensure_parent(out_path)
     if summary_df.empty:
         return Path(out_path)
 
-    df = _apply_filters(
-        summary_df,
-        attacks=attacks,
-        methods=methods,
-        dt_levels=dt_levels,
-        mal_nodes=mal_nodes,
-    )
+    df = _apply_filters(summary_df, attacks=attacks, methods=methods, dt_levels=dt_levels, mal_nodes=mal_nodes)
     if df.empty:
         return Path(out_path)
+    if "tau_gate" not in df.columns:
+        return Path(out_path)
 
-    fig, ax = plt.subplots(figsize=(7, 4))
+    fig, ax = plt.subplots(figsize=figsize)
     if attacks is None:
         attacks = sorted(pd.unique(df["attack"]).tolist())
 
-    mean_col = f"{metric}_m" if f"{metric}_m" in df.columns else metric
+    mean_col = _pick_metric_column(df, metric)
+    if mean_col is None:
+        return Path(out_path)
+    metric_name = _metric_display_name(metric)
 
-    for attack in attacks:
-        sub = df[df["attack"] == attack]
-        if attack == "label_flip":
-            sub = sub[sub.get("level", "") == label_flip_level]
-        by_tau = sub.groupby("tau_gate")[mean_col].agg(["mean", "std", "count"])
-        if by_tau.empty:
-            continue
-        x = pd.to_numeric(by_tau.index, errors="coerce").to_numpy(dtype=float)
-        y = by_tau["mean"].to_numpy(dtype=float)
-        c = by_tau["count"].to_numpy(dtype=int)
-        s = by_tau["std"].to_numpy(dtype=float)
-        ci = 1.96 * np.divide(s, np.sqrt(c), out=np.zeros_like(s), where=c > 0)
-        line = ax.plot(x, y, marker="o", linewidth=1.4, label=attack)
-        _ci_fill(ax, x, y, ci, color=line[0].get_color())
+    tau_vals = pd.to_numeric(df["tau_gate"], errors="coerce").dropna().to_numpy(dtype=float)
+    unique_tau = np.sort(np.unique(tau_vals))
+    use_single = single_point_fallback and unique_tau.size < max(2, int(min_unique_tau))
 
-    ax.set_title("clean F1 vs tau_gate")
-    ax.set_xlabel("tau_gate")
-    ax.set_ylabel("clean F1")
+    palette = plt.rcParams["axes.prop_cycle"].by_key().get("color", [])
+    if not palette:
+        palette = ["#4c72b0", "#dd8452", "#55a868", "#c44e52", "#8172b3", "#937860"]
+
+    if use_single:
+        x = np.arange(len(attacks), dtype=float)
+        for i, attack in enumerate(attacks):
+            sub = df[df["attack"] == attack]
+            if attack == "label_flip":
+                sub = sub[sub.get("level", "") == label_flip_level]
+            if sub.empty:
+                continue
+            m, ci, n = _single_point_estimate(sub, metric)
+            if not np.isfinite(m):
+                continue
+            ax.errorbar(
+                x[i],
+                m,
+                yerr=ci,
+                marker="o",
+                markersize=7,
+                linewidth=2.0,
+                capsize=3,
+                color=palette[i % len(palette)],
+                label=attack,
+            )
+            ax.annotate(
+                f"n={n}",
+                (x[i], m),
+                textcoords="offset points",
+                xytext=(0, 7),
+                ha="center",
+                fontsize=8,
+            )
+        ax.set_xticks(x)
+        ax.set_xticklabels(attacks, rotation=20)
+        label = f"{unique_tau[0]:.2f}" if unique_tau.size > 0 else "N/A"
+        ax.set_title(f"{metric_name} vs tau_gate (single snapshot, tau_gate={label})")
+        ax.text(
+            0.98,
+            0.02,
+            "Single tau: each attack appears as one point.",
+            transform=ax.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=8,
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.7),
+        )
+        ax.set_xlabel("Attack")
+    else:
+        for i, attack in enumerate(attacks):
+            sub = df[df["attack"] == attack]
+            if attack == "label_flip":
+                sub = sub[sub.get("level", "") == label_flip_level]
+            by_tau = sub.groupby("tau_gate")[mean_col].agg(["mean", "std", "count"])
+            if by_tau.empty:
+                continue
+            x = pd.to_numeric(by_tau.index, errors="coerce").to_numpy(dtype=float)
+            y = by_tau["mean"].to_numpy(dtype=float)
+            c = by_tau["count"].to_numpy(dtype=int)
+            s = by_tau["std"].to_numpy(dtype=float)
+            ci = 1.96 * np.divide(s, np.sqrt(c), out=np.zeros_like(s), where=c > 0)
+            line = ax.plot(
+                x,
+                y,
+                marker="o",
+                linewidth=2.0,
+                markersize=6,
+                color=palette[i % len(palette)],
+                label=attack,
+            )
+            _ci_fill(ax, x, y, ci, color=line[0].get_color())
+        ax.set_title(f"{metric_name} vs tau_gate")
+        ax.set_xlabel("tau_gate")
+
+    ax.set_ylabel(metric_name)
     ax.set_ylim(0, 1)
     ax.grid(alpha=0.2)
-    ax.legend()
+    ax.legend(fontsize=8)
     fig.tight_layout()
-    plt.savefig(out_path, dpi=200)
+    plt.savefig(out_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
     return Path(out_path)
 
@@ -732,6 +1041,8 @@ def plot_wmal_vs_tau(
     mal_nodes: Optional[Sequence[int]] = None,
     methods: Optional[Sequence[str]] = None,
     label_flip_level: str = "L1",
+    single_point_fallback: bool = False,
+    min_unique_tau: int = 2,
 ) -> Path:
     return plot_cleanf1_vs_tau(
         summary_df,
@@ -742,6 +1053,8 @@ def plot_wmal_vs_tau(
         methods=methods,
         label_flip_level=label_flip_level,
         metric="w_mal",
+        single_point_fallback=single_point_fallback,
+        min_unique_tau=min_unique_tau,
     )
 
 
@@ -754,6 +1067,8 @@ def plot_fp_benign_vs_tau(
     mal_nodes: Optional[Sequence[int]] = None,
     methods: Optional[Sequence[str]] = None,
     label_flip_level: str = "L1",
+    single_point_fallback: bool = False,
+    min_unique_tau: int = 2,
 ) -> Path:
     _ensure_parent(out_path)
     if summary_df.empty:
@@ -770,34 +1085,99 @@ def plot_fp_benign_vs_tau(
     if df.empty or metric is None:
         return Path(out_path)
 
-    fig, ax = plt.subplots(figsize=(7, 4))
+    fig, ax = plt.subplots(figsize=(8.2, 4.4))
     if attacks is None:
         attacks = sorted(pd.unique(df["attack"]).tolist())
+    metric_name = _metric_display_name(metric)
 
-    for attack in attacks:
-        sub = df[df["attack"] == attack]
-        if attack == "label_flip":
-            sub = sub[sub.get("level", "") == label_flip_level]
-        by_tau = sub.groupby("tau_gate")[metric].agg(["mean", "std", "count"])
-        if by_tau.empty:
-            continue
-        x = pd.to_numeric(by_tau.index, errors="coerce").to_numpy(dtype=float)
-        fp = 1.0 - by_tau["mean"].to_numpy(dtype=float)
-        s = by_tau["std"].to_numpy(dtype=float)
-        c = by_tau["count"].to_numpy(dtype=int)
-        ci = 1.96 * np.divide(s, np.sqrt(c), out=np.zeros_like(s), where=c > 0)
-        line = ax.plot(x, fp, marker="o", linewidth=1.4, label=f"{attack}")
-        _ci_fill(ax, x, fp, ci, color=line[0].get_color())
+    if "tau_gate" not in df.columns:
+        return Path(out_path)
+    tau_vals = pd.to_numeric(df["tau_gate"], errors="coerce").dropna().to_numpy(dtype=float)
+    unique_tau = np.sort(np.unique(tau_vals))
+    use_single = single_point_fallback and unique_tau.size < max(2, int(min_unique_tau))
 
-    ax.set_title("benign false positive rate vs tau_gate")
-    ax.set_xlabel("tau_gate")
-    ax.set_ylabel("1 - benign_pass_rate")
+    palette = plt.rcParams["axes.prop_cycle"].by_key().get("color", [])
+    if not palette:
+        palette = ["#4c72b0", "#dd8452", "#55a868", "#c44e52", "#8172b3", "#937860"]
+
+    if use_single:
+        x = np.arange(len(attacks), dtype=float)
+        for i, attack in enumerate(attacks):
+            sub = df[df["attack"] == attack]
+            if attack == "label_flip":
+                sub = sub[sub.get("level", "") == label_flip_level]
+            if sub.empty:
+                continue
+            m, ci, n = _single_point_estimate(sub, metric)
+            if not np.isfinite(m):
+                continue
+            y = 1.0 - m
+            ax.errorbar(
+                x[i],
+                y,
+                yerr=ci,
+                marker="o",
+                markersize=7,
+                linewidth=2.0,
+                capsize=3,
+                color=palette[i % len(palette)],
+                label=attack,
+            )
+            ax.annotate(
+                f"n={n}",
+                (x[i], y),
+                textcoords="offset points",
+                xytext=(0, 7),
+                ha="center",
+                fontsize=8,
+            )
+        ax.set_xticks(x)
+        ax.set_xticklabels(attacks, rotation=20)
+        label = f"{unique_tau[0]:.2f}" if unique_tau.size > 0 else "N/A"
+        ax.set_title(f"{metric_name} vs tau_gate (single snapshot, tau_gate={label})")
+        ax.text(
+            0.98,
+            0.02,
+            "Single tau: each attack appears as one point.",
+            transform=ax.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=8,
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.7),
+        )
+        ax.set_xlabel("Attack")
+    else:
+        for attack in attacks:
+            sub = df[df["attack"] == attack]
+            if attack == "label_flip":
+                sub = sub[sub.get("level", "") == label_flip_level]
+            by_tau = sub.groupby("tau_gate")[metric].agg(["mean", "std", "count"])
+            if by_tau.empty:
+                continue
+            x = pd.to_numeric(by_tau.index, errors="coerce").to_numpy(dtype=float)
+            fp = 1.0 - by_tau["mean"].to_numpy(dtype=float)
+            s = by_tau["std"].to_numpy(dtype=float)
+            c = by_tau["count"].to_numpy(dtype=int)
+            ci = 1.96 * np.divide(s, np.sqrt(c), out=np.zeros_like(s), where=c > 0)
+            line = ax.plot(
+                x,
+                fp,
+                marker="o",
+                linewidth=2.0,
+                markersize=6,
+                label=f"{attack}",
+            )
+            _ci_fill(ax, x, fp, ci, color=line[0].get_color())
+        ax.set_title("benign false positive rate vs tau_gate")
+        ax.set_xlabel("tau_gate")
+
+    ax.set_ylabel(metric_name)
     ax.set_ylim(0, 1)
-    ax.grid(alpha=0.2)
+    ax.grid(alpha=0.2 if not use_single else 0.25)
     ax.legend()
 
     fig.tight_layout()
-    plt.savefig(out_path, dpi=200)
+    plt.savefig(out_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
     return Path(out_path)
 
@@ -976,6 +1356,8 @@ def plot_passrate_vs_round(
     method: str = "weighted",
     metric: str = "benign_pass_rate",
     label_flip_level: str = "L1",
+    split_metric: bool = False,
+    figsize: Tuple[float, float] = (8.2, 4.4),
 ) -> Path:
     _ensure_parent(out_path)
     if rounds_df.empty:
@@ -991,8 +1373,17 @@ def plot_passrate_vs_round(
     if attacks is None:
         attacks = sorted(pd.unique(df["attack"]).tolist())
 
-    fig, ax = plt.subplots(figsize=(7, 4))
+    if split_metric and metric == "benign_pass_rate":
+        fig, axes = plt.subplots(2, 1, figsize=(figsize[0], figsize[1] + 0.9), sharex=True)
+        ax_benign, ax_malicious = axes
+    else:
+        fig, ax_benign = plt.subplots(figsize=figsize)
+        ax_malicious = None
+    handles: list = []
+    labels: list[str] = []
+
     for attack in attacks:
+        target_b = ax_benign
         sub = df[df["attack"] == attack]
         if attack == "label_flip" and "level" in sub.columns:
             sub = sub[sub["level"] == label_flip_level]
@@ -1000,17 +1391,47 @@ def plot_passrate_vs_round(
         if metric == "benign_pass_rate":
             bcol = "benign_pass_rate"
             mcol = "malicious_pass_rate"
-            for idx, (col, label, marker) in enumerate(
-                [(bcol, f"{attack} benign", "o"), (mcol, f"{attack} malicious", "s")]
-            ):
-                by_round = sub.groupby("round")[col].agg(["mean", "std", "count"])
+            if split_metric:
+                for col, target_ax in [(bcol, ax_benign), (mcol, ax_malicious)]:
+                    if target_ax is None:
+                        continue
+                    by_round = sub.groupby("round")[col].agg(["mean", "std", "count"])
+                    r = by_round.index.to_numpy()
+                    y = by_round["mean"].to_numpy(dtype=float)
+                    c = by_round["count"].to_numpy(dtype=int)
+                    s = by_round["std"].to_numpy(dtype=float)
+                    ci = 1.96 * np.divide(s, np.sqrt(c), out=np.zeros_like(s), where=c > 0)
+                    line = target_ax.plot(
+                        r,
+                        y,
+                        marker="o",
+                        linewidth=2.0,
+                        markersize=6,
+                        label=f"{attack}",
+                    )
+                    _ci_fill(target_ax, r, y, ci, color=line[0].get_color())
+                    if target_ax is ax_benign and attack not in labels:
+                        handles.append(line[0])
+                        labels.append(attack)
+            else:
+                by_round = sub.groupby("round")[bcol].agg(["mean", "std", "count"])
                 r = by_round.index.to_numpy()
                 y = by_round["mean"].to_numpy(dtype=float)
                 c = by_round["count"].to_numpy(dtype=int)
                 s = by_round["std"].to_numpy(dtype=float)
                 ci = 1.96 * np.divide(s, np.sqrt(c), out=np.zeros_like(s), where=c > 0)
-                line = ax.plot(r, y, marker=marker, linewidth=1.2, label=label)
-                _ci_fill(ax, r, y, ci, color=line[0].get_color())
+                line = target_b.plot(
+                    r,
+                    y,
+                    marker="o",
+                linewidth=2.0,
+                markersize=6,
+                label=f"{attack}",
+            )
+            _ci_fill(target_b, r, y, ci, color=line[0].get_color())
+            if attack not in labels:
+                handles.append(line[0])
+                labels.append(attack)
         else:
             by_round = sub.groupby("round")[metric].agg(["mean", "std", "count"])
             r = by_round.index.to_numpy()
@@ -1018,17 +1439,70 @@ def plot_passrate_vs_round(
             c = by_round["count"].to_numpy(dtype=int)
             s = by_round["std"].to_numpy(dtype=float)
             ci = 1.96 * np.divide(s, np.sqrt(c), out=np.zeros_like(s), where=c > 0)
-            line = ax.plot(r, y, marker="o", linewidth=1.2, label=attack)
-            _ci_fill(ax, r, y, ci, color=line[0].get_color())
+            line = ax_benign.plot(
+                r,
+                y,
+                marker="o",
+                linewidth=2.0,
+                markersize=6,
+                label=attack,
+            )
+            _ci_fill(ax_benign, r, y, ci, color=line[0].get_color())
+            if attack not in labels:
+                handles.append(line[0])
+                labels.append(attack)
 
-    ax.set_title(f"Pass-rate vs round (f={mal_nodes}, dt={dt_level}, {method})")
-    ax.set_xlabel("Round")
-    ax.set_ylabel("Rate")
-    ax.set_ylim(0, 1)
-    ax.grid(alpha=0.2)
-    ax.legend(fontsize=8)
-    fig.tight_layout()
-    plt.savefig(out_path, dpi=200)
+    if split_metric and metric == "benign_pass_rate":
+        ax_benign.set_title(f"Benign pass rate vs round (f={mal_nodes}, dt={dt_level}, {method})")
+        ax_benign.set_ylabel("benign pass rate")
+        ax_benign.set_ylim(0, 1)
+        ax_benign.grid(alpha=0.2)
+        ax_benign.tick_params(axis="x", labelbottom=False)
+
+        if ax_malicious is not None:
+            ax_malicious.set_title(f"Malicious pass rate vs round (f={mal_nodes}, dt={dt_level}, {method})")
+            ax_malicious.set_xlabel("Round")
+            ax_malicious.set_ylabel("malicious pass rate")
+            ax_malicious.set_ylim(0, 1)
+            ax_malicious.grid(alpha=0.2)
+            ax_malicious.tick_params(axis="x", labelbottom=True)
+    else:
+        ax_benign.set_title(f"Pass-rate vs round (f={mal_nodes}, dt={dt_level}, {method})")
+        ax_benign.set_xlabel("Round")
+        ax_benign.set_ylabel("Rate")
+        ax_benign.set_ylim(0, 1)
+        ax_benign.grid(alpha=0.2)
+
+    if handles and labels:
+        uniq: list[tuple[object, str]] = []
+        seen: set[str] = set()
+        for h, lb in zip(handles, labels):
+            if lb in seen:
+                continue
+            seen.add(lb)
+            uniq.append((h, lb))
+        fig.legend(
+            [h for h, _ in uniq],
+            [lb for _, lb in uniq],
+            loc="upper center",
+            ncol=min(len(uniq), 3),
+            bbox_to_anchor=(0.5, 0.99),
+            frameon=False,
+            fontsize=8,
+        )
+
+    if not split_metric:
+        ax_benign.set_xlabel("Round")
+    else:
+        ax_benign.set_xlabel("Round")
+
+    if split_metric:
+        fig.tight_layout(rect=[0, 0, 1, 0.95])
+        if handles:
+            fig.subplots_adjust(top=0.9, hspace=0.25)
+    else:
+        fig.tight_layout()
+    plt.savefig(out_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
     return Path(out_path)
 

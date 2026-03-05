@@ -43,8 +43,8 @@ def main():
     ap.add_argument(
         "--figs",
         type=str,
-        default="1,2,3,5,6,7,8,9",
-        help="Comma list of figure indices to generate (1-9)",
+        default="1,2,3,5,8,9",
+        help="Comma list of figure indices to generate (1-9). 6/7 are deprecated from mainline and off by default.",
     )
     ap.add_argument(
         "--dt", type=str, default="D0", help="DT level to plot (D0/D1/D2)"
@@ -72,6 +72,31 @@ def main():
         type=str,
         default="label_flip,stealth_amp,dt_logit_scale",
         help="Comma list of attacks",
+    )
+    ap.add_argument(
+        "--tau-plot-mode",
+        type=str,
+        default="auto",
+        choices=["auto", "single", "line"],
+        help="Tau plot mode for Fig.6: auto=decide from available tau_gate count, single=force point summary, line=force line",
+    )
+    ap.add_argument(
+        "--passrate-split",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Plot benign/malicious pass rates in separate subpanels for Fig.7",
+    )
+    ap.add_argument(
+        "--sdt-relative",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use S_DT relative normalization in Fig.5",
+    )
+    ap.add_argument(
+        "--sdt-show-ratio",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show S_DT_ratio panel in Fig.5 when available",
     )
     ap.add_argument(
         "--f-fig2",
@@ -107,7 +132,7 @@ def main():
         "--tau-gate",
         type=float,
         default=None,
-        help="Optional tau filter for sensitivity plots",
+        help="Optional tau filter for sensitivity plots; used as gate-line reference for Fig.3 when set (or default 0.70).",
     )
     ap.add_argument(
         "--lambda-m",
@@ -126,6 +151,12 @@ def main():
         type=int,
         default=None,
         help="Optional audit size filter",
+    )
+    ap.add_argument(
+        "--allow-deprecated-figs",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Allow generating deprecated mainline figures (6,7).",
     )
     args = ap.parse_args()
 
@@ -197,6 +228,7 @@ def main():
     if 3 in figs:
         fig3_f = int(args.f_fig3)
         fig3 = out_dir / f"Fig3_R4_distribution_dt{dt}_f{fig3_f}.png"
+        fig3_tau_gate = 0.70 if args.tau_gate is None else float(args.tau_gate)
         plot_r4_distribution(
             nodes_df,
             attack="dt_logit_scale",
@@ -204,6 +236,9 @@ def main():
             mal_nodes=fig3_f,
             out_path=str(fig3),
             method="weighted",
+            show_title=True,
+            tau_gate=fig3_tau_gate,
+            show_scatter=True,
         )
 
     # --- Figure 4: ablation ---
@@ -232,6 +267,8 @@ def main():
             attacks=attacks,
             out_path=str(fig5),
             methods=["weighted"],
+            show_relative=args.sdt_relative,
+            show_ratio=args.sdt_show_ratio,
         )
 
         fallback_table = plot_fallback_prob_table(
@@ -244,45 +281,77 @@ def main():
         if not fallback_table.empty:
             fallback_table.to_csv(out_dir / f"Fig5_fallback_prob_dt{dt}.csv", index=False)
 
-    # --- Figure 6: tau sensitivity ---
+    # --- Figure 6: tau sensitivity (mainline deprecated) ---
     if 6 in figs:
-        plot_cleanf1_vs_tau(
-            summary_df,
-            out_path=str(out_dir / f"Fig6_cleanF1_vs_tau_dt{dt}.png"),
-            attacks=attacks,
-            dt_levels=[dt],
-            methods=["weighted"],
-            label_flip_level="L1",
-            metric="clean_f1",
-        )
-        plot_wmal_vs_tau(
-            summary_df,
-            out_path=str(out_dir / f"Fig6_Wmal_vs_tau_dt{dt}.png"),
-            attacks=attacks,
-            dt_levels=[dt],
-            methods=["weighted"],
-            label_flip_level="L1",
-        )
-        plot_fp_benign_vs_tau(
-            summary_df,
-            out_path=str(out_dir / f"Fig6_FPerr_vs_tau_dt{dt}.png"),
-            attacks=attacks,
-            dt_levels=[dt],
-            methods=["weighted"],
-            label_flip_level="L1",
-        )
+        if not args.allow_deprecated_figs:
+            print(
+                "[warn] Figure 6 is deprecated from mainline and skipped. "
+                "Use --allow-deprecated-figs if you want to generate it."
+            )
+        else:
+            df_tau = summary_df.copy()
+            df_tau = df_tau[df_tau["dt_level"].astype(str) == str(dt)]
+            if "method" in df_tau.columns:
+                df_tau = df_tau[df_tau["method"].astype(str) == "weighted"]
+            if mal_nodes is not None and "mal_nodes" in df_tau.columns:
+                df_tau = df_tau[df_tau["mal_nodes"].isin(list(mal_nodes))]
+            tau_g = pd.to_numeric(df_tau["tau_gate"], errors="coerce").dropna() if "tau_gate" in df_tau.columns else pd.Series(dtype=float)
+            unique_tau = pd.unique(tau_g)
+            if args.tau_plot_mode == "auto":
+                tau_plot_single = len(unique_tau) < 2
+            elif args.tau_plot_mode == "single":
+                tau_plot_single = True
+            else:
+                tau_plot_single = False
+
+            plot_cleanf1_vs_tau(
+                summary_df,
+                out_path=str(out_dir / f"Fig6_cleanF1_vs_tau_dt{dt}.png"),
+                attacks=attacks,
+                dt_levels=[dt],
+                methods=["weighted"],
+                label_flip_level="L1",
+                metric="clean_f1",
+                single_point_fallback=tau_plot_single,
+            )
+            plot_wmal_vs_tau(
+                summary_df,
+                out_path=str(out_dir / f"Fig6_Wmal_vs_tau_dt{dt}.png"),
+                attacks=attacks,
+                dt_levels=[dt],
+                methods=["weighted"],
+                label_flip_level="L1",
+                single_point_fallback=tau_plot_single,
+            )
+            plot_fp_benign_vs_tau(
+                summary_df,
+                out_path=str(out_dir / f"Fig6_FPerr_vs_tau_dt{dt}.png"),
+                attacks=attacks,
+                dt_levels=[dt],
+                methods=["weighted"],
+                label_flip_level="L1",
+                single_point_fallback=tau_plot_single,
+            )
 
     # --- Figure 7: pass-rate curves over rounds ---
+    # --- Figure 7: pass-rate curves over rounds (mainline deprecated) ---
     if 7 in figs:
-        plot_passrate_vs_round(
-            rounds_df,
-            dt_level=dt,
-            mal_nodes=int(args.f_fig2),
-            attacks=attacks,
-            out_path=str(out_dir / f"Fig7_passrate_vs_round_dt{dt}_f{args.f_fig2}.png"),
-            method="weighted",
-            metric="benign_pass_rate",
-        )
+        if not args.allow_deprecated_figs:
+            print(
+                "[warn] Figure 7 is deprecated from mainline and skipped. "
+                "Use --allow-deprecated-figs if you want to generate it."
+            )
+        else:
+            plot_passrate_vs_round(
+                rounds_df,
+                dt_level=dt,
+                mal_nodes=int(args.f_fig2),
+                attacks=attacks,
+                out_path=str(out_dir / f"Fig7_passrate_vs_round_dt{dt}_f{args.f_fig2}.png"),
+                method="weighted",
+                metric="benign_pass_rate",
+                split_metric=args.passrate_split,
+            )
 
     # --- Figure 8: ref-size and audit-size sensitivity ---
     if 8 in figs:
