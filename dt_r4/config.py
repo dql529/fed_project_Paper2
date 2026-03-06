@@ -116,12 +116,12 @@ STUDENT_FEATURE_IDX = list(range(9))
 # R4 / 信誉
 # ---------------------------------------------------------------------------
 R4_ALPHA_LIST = [0, 4]
-ABLATION_CONFIGS = ["R2,R3", "R2,R3,R4", "R4"]
+ABLATION_CONFIGS = ["R2,R4", "R4"]
 
 R4_ONLY_BETA = 10.0  # R4-only 映射
 MIX_R4_BETA = 12.0  # 混合时额外放大
 BETA_R2 = 0.1  # 保留性能分量，用于对比 R2 高 / R4 低
-BETA_R3 = 0.0
+BETA_R3 = 0.0  # final paper config: disabled
 BETA_R4 = 8.0
 REP_Z_CLAMP = 20.0
 

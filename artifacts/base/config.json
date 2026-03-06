@@ -1,10 +1,10 @@
 {
-  "command": "r4_agg_minitest.py --attack-modes label_flip,stealth_amp,dt_logit_scale --dt-levels D0 --mal-nodes 0,3,5 --methods weighted,mean,median,trimmed_mean --seeds 0,1,2,3,4 --exp-group base --out-root artifacts",
+  "command": "r4_agg_minitest.py --attack-modes label_flip,stealth_amp,dt_logit_scale --dt-levels D0 --mal-nodes 0,3,5 --methods mean,median,trimmed_mean,weighted,weighted_r2only,weighted_r4only --seeds 0,1,2,3,4 --ref-size-grid 128 --audit-size-grid 0 --out-root artifacts --exp-group base",
   "deploy_variant": 1,
   "dt_support_min": 10,
   "fallback_mode": "median",
   "group": "base",
-  "group_runs": 180,
+  "group_runs": 270,
   "rounds": 15,
   "scenario": "A",
   "schema": {
@@ -125,13 +125,15 @@
     5
   ],
   "selected_methods": [
-    "weighted",
     "mean",
     "median",
-    "trimmed_mean"
+    "trimmed_mean",
+    "weighted",
+    "weighted_r2only",
+    "weighted_r4only"
   ],
   "selected_ref_size_grid": [
-    512
+    128
   ],
   "selected_seeds": [
     0,

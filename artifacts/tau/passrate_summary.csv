@@ -1,1 +1,13 @@
 attack_mode,attack,level,dt_level,mal_nodes,method,tau_gate,lambda_m,ref_size,audit_size,benign_pass_rate_m,benign_pass_rate_s,malicious_pass_rate_m,malicious_pass_rate_s,count
+dt_logit_scale,dt_logit_scale,,D0,3,weighted,0.6,0.0,128,0,0.4609523809523809,0.13052831770675669,0.3244444444444444,0.12380789579719217,5
+dt_logit_scale,dt_logit_scale,,D0,3,weighted,0.8,0.0,128,0,0.026666666666666665,0.05333333333333333,0.0,0.0,5
+dt_logit_scale,dt_logit_scale,,D0,5,weighted,0.6,0.0,128,0,0.41066666666666674,0.09480740711803295,0.22399999999999998,0.17145650566057075,5
+dt_logit_scale,dt_logit_scale,,D0,5,weighted,0.8,0.0,128,0,0.021333333333333336,0.04266666666666667,0.002666666666666667,0.005333333333333334,5
+label_flip,label_flip,L1,D0,3,weighted,0.6,0.0,128,0,0.44571428571428573,0.0781648934426026,0.04444444444444444,0.03718489006818113,5
+label_flip,label_flip,L1,D0,3,weighted,0.8,0.0,128,0,0.0,0.0,0.0,0.0,5
+label_flip,label_flip,L1,D0,5,weighted,0.6,0.0,128,0,0.38933333333333336,0.13555482695614757,0.034666666666666665,0.031098410105841606,5
+label_flip,label_flip,L1,D0,5,weighted,0.8,0.0,128,0,0.0,0.0,0.0,0.0,5
+stealth_amp,stealth_amp,,D0,3,weighted,0.6,0.0,128,0,0.5371428571428571,0.09107072828862414,0.0,0.0,5
+stealth_amp,stealth_amp,,D0,3,weighted,0.8,0.0,128,0,0.0,0.0,0.0,0.0,5
+stealth_amp,stealth_amp,,D0,5,weighted,0.6,0.0,128,0,0.552,0.0510163372525573,0.0,0.0,5
+stealth_amp,stealth_amp,,D0,5,weighted,0.8,0.0,128,0,0.0,0.0,0.0,0.0,5

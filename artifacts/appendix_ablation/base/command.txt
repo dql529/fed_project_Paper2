@@ -1,0 +1,1 @@
+r4_agg_minitest.py --attack-modes label_flip,stealth_amp,dt_logit_scale --dt-levels D0 --mal-nodes 5 --methods weighted,weighted_r4only --seeds 0,1,2,3,4 --ref-size-grid 128 --audit-size-grid 0 --out-root artifacts/appendix_ablation --exp-group base

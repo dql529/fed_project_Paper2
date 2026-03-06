@@ -1,0 +1,1 @@
+r4_agg_minitest.py --attack-modes label_flip --dt-levels D0 --mal-nodes 3 --methods weighted --seeds 0,1,2,3,4 --tau-grid 0.6,0.7 --ref-size-grid 128 --audit-size-grid 0 --out-root artifacts/appendix_taucheck --exp-group tau

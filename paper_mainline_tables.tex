@@ -1,0 +1,137 @@
+% Ready-to-paste LaTeX tables for the main paper and supplementary discussion.
+% Derived from artifacts/paper_tables/*.csv.
+
+\begin{table*}[t]
+\centering
+\small
+\setlength{\tabcolsep}{5pt}
+\caption{Main performance summary under the final D0 setting. Columns report clean holdout macro-F1, polluted macro-F1, and $\Delta F_1 = \text{clean }F_1 - \text{polluted }F_1$. We include $f=0$ to show non-attack behavior rather than to claim universal dominance, and we focus on $f=5$ together with \texttt{label\_flip}, $f=3$ as the main stress and boundary regimes.}
+\label{tab:main_performance}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{llccc}
+\hline
+Scenario & Method & Clean F1 & Polluted F1 & $\Delta F_1$ \\
+\hline
+\texttt{label\_flip}, $f=0$ & Mean & 0.7603 & 0.7654 & -0.0051 \\
+\texttt{label\_flip}, $f=0$ & Median & 0.7636 & 0.7673 & -0.0038 \\
+\texttt{label\_flip}, $f=0$ & Trimmed Mean & 0.7627 & 0.7672 & -0.0044 \\
+\texttt{label\_flip}, $f=0$ & Weighted & 0.7606 & 0.7656 & -0.0049 \\
+\hline
+\texttt{label\_flip}, $f=3$ & Mean & 0.3587 & 0.3651 & -0.0063 \\
+\texttt{label\_flip}, $f=3$ & Median & 0.7621 & 0.6371 & 0.1251 \\
+\texttt{label\_flip}, $f=3$ & Trimmed Mean & 0.7061 & 0.5923 & 0.1138 \\
+\texttt{label\_flip}, $f=3$ & Weighted & 0.7562 & 0.6308 & 0.1253 \\
+\hline
+\texttt{label\_flip}, $f=5$ & Mean & 0.3132 & 0.3269 & -0.0137 \\
+\texttt{label\_flip}, $f=5$ & Median & 0.3671 & 0.3661 & 0.0010 \\
+\texttt{label\_flip}, $f=5$ & Trimmed Mean & 0.3132 & 0.3269 & -0.0137 \\
+\texttt{label\_flip}, $f=5$ & Weighted & \textbf{0.7369} & \textbf{0.5568} & \textbf{0.1800} \\
+\hline
+\texttt{stealth\_amp}, $f=0$ & Mean & 0.7603 & 0.7654 & -0.0051 \\
+\texttt{stealth\_amp}, $f=0$ & Median & 0.7636 & 0.7673 & -0.0038 \\
+\texttt{stealth\_amp}, $f=0$ & Trimmed Mean & 0.7627 & 0.7672 & -0.0044 \\
+\texttt{stealth\_amp}, $f=0$ & Weighted & 0.7606 & 0.7656 & -0.0049 \\
+\hline
+\texttt{stealth\_amp}, $f=5$ & Mean & 0.4928 & 0.4949 & -0.0021 \\
+\texttt{stealth\_amp}, $f=5$ & Median & 0.7132 & 0.7168 & -0.0036 \\
+\texttt{stealth\_amp}, $f=5$ & Trimmed Mean & 0.4953 & 0.4945 & 0.0008 \\
+\texttt{stealth\_amp}, $f=5$ & Weighted & \textbf{0.7637} & \textbf{0.7691} & -0.0054 \\
+\hline
+\texttt{dt\_logit\_scale}, $f=0$ & Mean & 0.7603 & 0.7654 & -0.0051 \\
+\texttt{dt\_logit\_scale}, $f=0$ & Median & 0.7636 & 0.7673 & -0.0038 \\
+\texttt{dt\_logit\_scale}, $f=0$ & Trimmed Mean & 0.7627 & 0.7672 & -0.0044 \\
+\texttt{dt\_logit\_scale}, $f=0$ & Weighted & 0.7606 & 0.7656 & -0.0049 \\
+\hline
+\texttt{dt\_logit\_scale}, $f=5$ & Mean & 0.5613 & 0.5599 & 0.0014 \\
+\texttt{dt\_logit\_scale}, $f=5$ & Median & 0.6430 & 0.6396 & 0.0034 \\
+\texttt{dt\_logit\_scale}, $f=5$ & Trimmed Mean & 0.5949 & 0.5952 & -0.0003 \\
+\texttt{dt\_logit\_scale}, $f=5$ & Weighted & \textbf{0.7712} & \textbf{0.7764} & -0.0052 \\
+\hline
+\end{tabular}
+}
+\end{table*}
+
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\caption{Mechanism summary for the proposed \texttt{weighted} aggregation under the final D0 setting. For benign and malicious clients, we report mean $R4$, the unnormalized reputation score $\mathrm{Rep}$, the normalized admitted reputation weight $\pi$, and the gate pass rate.}
+\label{tab:mechanism_summary}
+\resizebox{\columnwidth}{!}{
+\begin{tabular}{llcccc}
+\hline
+Scenario & Group & $R4$ & $\mathrm{Rep}$ & $\pi$ & Pass rate \\
+\hline
+\texttt{label\_flip}, $f=3$ & Benign & 0.6933 & 50.95 & 0.1356 & 0.2571 \\
+\texttt{label\_flip}, $f=3$ & Malicious & 0.5888 & 6.33 & 0.0169 & 0.0000 \\
+\hline
+\texttt{label\_flip}, $f=5$ & Benign & 0.6735 & 36.53 & 0.1740 & 0.1600 \\
+\texttt{label\_flip}, $f=5$ & Malicious & 0.5574 & 5.01 & 0.0260 & 0.0000 \\
+\hline
+\texttt{stealth\_amp}, $f=5$ & Benign & 0.7184 & 84.84 & 0.2000 & 0.9200 \\
+\texttt{stealth\_amp}, $f=5$ & Malicious & 0.0004 & 0.00 & 0.0000 & 0.0000 \\
+\hline
+\texttt{dt\_logit\_scale}, $f=5$ & Benign & 0.7373 & 212.57 & 0.1795 & 0.8000 \\
+\texttt{dt\_logit\_scale}, $f=5$ & Malicious & 0.6148 & 36.02 & 0.0205 & 0.1200 \\
+\hline
+\end{tabular}
+}
+\end{table}
+
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\caption{Ablation summary comparing the final method (\texttt{R2+R4}) with the paper ablation (\texttt{R4-only}).}
+\label{tab:ablation_r4only}
+\resizebox{\columnwidth}{!}{
+\begin{tabular}{llcccc}
+\hline
+Scenario & Method & Clean F1 & Polluted F1 & $\Delta F_1$ & $W_{\mathrm{mal}}$ \\
+\hline
+\texttt{label\_flip}, $f=3$ & \texttt{R2+R4} & 0.7562 & 0.6308 & 0.1253 & 0.0506 \\
+\texttt{label\_flip}, $f=3$ & \texttt{R4-only} & 0.7363 & 0.6164 & 0.1199 & 0.1165 \\
+\hline
+\texttt{label\_flip}, $f=5$ & \texttt{R2+R4} & 0.7369 & 0.5568 & 0.1800 & 0.1302 \\
+\texttt{label\_flip}, $f=5$ & \texttt{R4-only} & 0.5237 & 0.4505 & 0.0732 & 0.2279 \\
+\hline
+\texttt{stealth\_amp}, $f=5$ & \texttt{R2+R4} & 0.7637 & 0.7691 & -0.0054 & 0.0000 \\
+\texttt{stealth\_amp}, $f=5$ & \texttt{R4-only} & 0.7656 & 0.7696 & -0.0040 & 0.0000 \\
+\hline
+\texttt{dt\_logit\_scale}, $f=5$ & \texttt{R2+R4} & 0.7712 & 0.7764 & -0.0052 & 0.1026 \\
+\texttt{dt\_logit\_scale}, $f=5$ & \texttt{R4-only} & 0.7180 & 0.7197 & -0.0017 & 0.1341 \\
+\hline
+\end{tabular}
+}
+\end{table}
+
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\caption{Seed-level paired comparison between \texttt{weighted} and \texttt{median}. We report Wilcoxon signed-rank $p$ values and paired effect sizes ($d_z$).}
+\label{tab:stats_weighted_vs_median}
+\resizebox{\columnwidth}{!}{
+\begin{tabular}{llccc}
+\hline
+Scenario & Metric & Mean diff & $p$ value & $d_z$ \\
+\hline
+\texttt{label\_flip}, $f=5$ & Clean F1 & 0.3698 & 0.0625 & 3.49 \\
+\texttt{label\_flip}, $f=5$ & Polluted F1 & 0.1908 & 0.0625 & 2.38 \\
+\texttt{label\_flip}, $f=5$ & $\Delta F_1$ & 0.1790 & 0.0625 & 4.53 \\
+\hline
+\texttt{stealth\_amp}, $f=5$ & Clean F1 & 0.0505 & 0.1250 & 1.08 \\
+\texttt{stealth\_amp}, $f=5$ & Polluted F1 & 0.0523 & 0.1250 & 1.22 \\
+\texttt{stealth\_amp}, $f=5$ & $\Delta F_1$ & -0.0018 & 0.8125 & -0.23 \\
+\hline
+\texttt{dt\_logit\_scale}, $f=5$ & Clean F1 & 0.1282 & 0.0625 & 1.87 \\
+\texttt{dt\_logit\_scale}, $f=5$ & Polluted F1 & 0.1368 & 0.0625 & 2.06 \\
+\texttt{dt\_logit\_scale}, $f=5$ & $\Delta F_1$ & -0.0086 & 0.0625 & -1.24 \\
+\hline
+\texttt{label\_flip}, $f=3$ & Clean F1 & -0.0059 & 0.1250 & -0.69 \\
+\texttt{label\_flip}, $f=3$ & Polluted F1 & -0.0062 & 0.1875 & -0.68 \\
+\texttt{label\_flip}, $f=3$ & $\Delta F_1$ & 0.0003 & 1.0000 & 0.07 \\
+\hline
+\end{tabular}
+}
+\end{table}

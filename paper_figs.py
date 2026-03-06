@@ -18,6 +18,7 @@ from dt_r4.plotting import (
     plot_auditsize_sensitivity,
     plot_clean_holdout_vs_f,
     plot_cleanf1_vs_tau,
+    plot_node_score_distribution,
     plot_fp_benign_vs_tau,
     plot_passrate_vs_round,
     plot_r4_distribution,
@@ -114,7 +115,7 @@ def main():
         "--f-fig3",
         type=int,
         default=5,
-        help="f (malicious clients) for Fig.3 R4 distribution",
+        help="f (malicious clients) for Fig.3 node-score distribution",
     )
     ap.add_argument(
         "--out-dir",
@@ -224,14 +225,14 @@ def main():
             method="weighted",
         )
 
-    # --- Figure 3: R4 distribution ---
+    # --- Figure 3: node-score distribution ---
     if 3 in figs:
         fig3_f = int(args.f_fig3)
-        fig3 = out_dir / f"Fig3_R4_distribution_dt{dt}_f{fig3_f}.png"
+        fig3 = out_dir / f"Fig3_node_scores_dt{dt}_f{fig3_f}.png"
         fig3_tau_gate = 0.70 if args.tau_gate is None else float(args.tau_gate)
-        plot_r4_distribution(
+        plot_node_score_distribution(
             nodes_df,
-            attack="dt_logit_scale",
+            attack="label_flip",
             dt_level=dt,
             mal_nodes=fig3_f,
             out_path=str(fig3),

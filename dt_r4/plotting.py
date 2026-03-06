@@ -1182,6 +1182,104 @@ def plot_fp_benign_vs_tau(
     return Path(out_path)
 
 
+def plot_node_score_distribution(
+    nodes_df: pd.DataFrame,
+    *,
+    attack: str,
+    dt_level: str,
+    mal_nodes: int,
+    out_path: str | Path,
+    method: str = "weighted",
+    label_flip_level: str = "L1",
+    primary: str = "pi_norm",
+    secondary: str = "R4",
+    show_title: bool = True,
+    tau_gate: float | None = 0.70,
+    show_scatter: bool = True,
+    jitter: float = 0.045,
+    scatter_alpha: float = 0.30,
+    scatter_size: float = 16.0,
+) -> Path:
+    _ensure_parent(out_path)
+    df = nodes_df.copy()
+    if df.empty:
+        return Path(out_path)
+    df = df[df["attack"] == attack]
+    df = df[df["dt_level"].astype(str) == str(dt_level)]
+    df = df[df["mal_nodes"].astype(int) == int(mal_nodes)]
+    df = df[df["method"].astype(str) == str(method)]
+    if attack == "label_flip" and "level" in df.columns:
+        df = df[df["level"] == label_flip_level]
+    if df.empty:
+        return Path(out_path)
+
+    if "pi_norm" not in df.columns:
+        group_cols = [c for c in ["attack", "dt_level", "mal_nodes", "method", "seed"] if c in df.columns]
+        if "round" in df.columns:
+            group_cols.append("round")
+        rep_vals = pd.to_numeric(df.get("Rep", np.nan), errors="coerce")
+        if group_cols:
+            denom = rep_vals.groupby([df[c] for c in group_cols]).transform("sum")
+        else:
+            denom = pd.Series(np.repeat(rep_vals.sum(), len(df)), index=df.index)
+        df["pi_norm"] = np.where(pd.to_numeric(denom, errors="coerce") > 0, rep_vals / denom, np.nan)
+
+    def _values(metric: str, is_malicious: int) -> np.ndarray:
+        if metric not in df.columns:
+            raise ValueError(f"Column '{metric}' not in nodes csv")
+        return pd.to_numeric(
+            df.loc[df["is_malicious"] == is_malicious, metric], errors="coerce"
+        ).dropna().to_numpy()
+
+    def _metric_label(metric: str) -> str:
+        return {"pi_norm": "Normalized reputation weight $\\pi$", "R4": "R4"}.get(metric, metric)
+
+    def _draw(ax: plt.Axes, metric: str) -> None:
+        benign = _values(metric, 0)
+        malicious = _values(metric, 1)
+        bp = ax.boxplot([benign, malicious], labels=["benign", "malicious"], patch_artist=True)
+        for patch, color in zip(bp["boxes"], ["#4c72b0", "#dd8452"]):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.65)
+        if show_scatter:
+            rng = np.random.default_rng(0)
+            xs: list[float] = []
+            ys: list[float] = []
+            if benign.size > 0:
+                xs.extend([1 + rng.normal(0, jitter) for _ in range(len(benign))])
+                ys.extend(list(benign))
+            if malicious.size > 0:
+                xs.extend([2 + rng.normal(0, jitter) for _ in range(len(malicious))])
+                ys.extend(list(malicious))
+            if xs and ys:
+                ax.scatter(
+                    xs,
+                    ys,
+                    s=scatter_size,
+                    alpha=scatter_alpha,
+                    edgecolors="none",
+                    c=["#4c72b0"] * len(benign) + ["#dd8452"] * len(malicious),
+                )
+        if metric == "R4" and tau_gate is not None:
+            ax.axhline(float(tau_gate), linestyle="--", linewidth=1.1, color="#6e6e6e", alpha=0.95)
+        ax.set_ylim(0, 1)
+        ax.set_ylabel(_metric_label(metric))
+        ax.set_title(_metric_label(metric))
+        ax.grid(alpha=0.2, axis="y")
+
+    fig, axes = plt.subplots(1, 2, figsize=(8.2, 4.0))
+    _draw(axes[0], primary)
+    _draw(axes[1], secondary)
+    if show_title:
+        fig.suptitle(f"Node score separation under {attack} (dt={dt_level}, f={mal_nodes})")
+        fig.tight_layout(rect=[0, 0, 1, 0.95])
+    else:
+        fig.tight_layout()
+    plt.savefig(out_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+    return Path(out_path)
+
+
 def plot_refsize_sensitivity(
     summary_df: pd.DataFrame,
     *,
@@ -1860,6 +1958,7 @@ __all__ = [
     "plot_wmal_vs_tau",
     "plot_sdt_vs_round",
     "plot_fallback_prob_table",
+    "plot_node_score_distribution",
     "plot_r4_distribution",
     "plot_wmal_vs_round",
     "plot_refsize_sensitivity",

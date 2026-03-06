@@ -561,20 +561,21 @@ def run_once(
         elif rep_ablation == "weighted_r2only":
             ablation_config = "R2"
         elif rep_ablation == "weighted_nogate":
-            ablation_config = "R2,R3,R4"
+            ablation_config = "R2,R4"
         else:
-            ablation_config = "R2,R3,R4"
+            ablation_config = "R2,R4"
         need_r4 = "R4" in {x.strip() for x in ablation_config.split(",") if x.strip()}
     else:
         ablation_config = ""
         need_r4 = False
+    rep_config = ablation_config if use_reputation and ablation_config in {"R2,R4", "R4"} else ""
 
     if method == "server_val":
         uses_dt = False
         method_detail = "server_val_audit_loss"
     elif method.startswith("weighted") and not (audit_size is None):
         # weighted baseline keeps DT support and fallback on R4 gate
-        uses_dt = (need_r4 and method in {"weighted", "weighted_full"}) and str(dt_level).upper() != "D0"
+        uses_dt = bool(need_r4) and str(dt_level).upper() != "D0"
         if not method_detail:
             method_detail = "weighted"
     elif method.startswith("weighted"):
@@ -1115,6 +1116,7 @@ def run_once(
                         "benign_admitted_weight_mass": float(b_mass),
                         "uses_dt": bool(uses_dt),
                         "method_detail": str(method_detail),
+                        "rep_config": str(rep_config),
                     }
                 )
 
@@ -1222,6 +1224,7 @@ def run_once(
                         "rep": n_rep,
                         "Rep": n_rep,
                         "pi": pi,
+                        "rep_config": str(rep_config),
                         "R2": float(comps[0]),
                         "R3": float(comps[1]),
                         "R4": float(comps[2]),
@@ -1280,6 +1283,7 @@ def run_once(
             "fallback_flag_first": int(fallback_flags[0]) if fallback_flags else int(0),
             "method_detail": str(method_detail),
             "uses_dt": bool(uses_dt),
+            "rep_config": str(rep_config),
             "mimic_loss": _nanmean_or_nan(mimic_losses),
             "poison_loss": _nanmean_or_nan(poison_losses),
             "final_kl_to_teacher": _nanmean_or_nan(final_kls),
@@ -1359,6 +1363,241 @@ def _build_mean_std_table(
             + ["count"]
         )
     return out.sort_values(group_cols).reset_index(drop=True)
+
+
+def _ensure_report_attack_columns(df: "pd.DataFrame") -> "pd.DataFrame":
+    if "attack" not in df.columns and "attack_mode" in df.columns:
+        df = df.copy()
+        df["attack"] = df["attack_mode"]
+    if "dt_level" not in df.columns:
+        df = df.copy()
+        df["dt_level"] = ""
+    if "level" not in df.columns:
+        df = df.copy()
+        df["level"] = ""
+    return df
+
+
+def _print_markdown_like_table(
+    title: str, df: "pd.DataFrame", keep_cols: Sequence[str], float_fmt: str = "{:.4f}"
+) -> None:
+    print(f"\n## {title}")
+    if df is None or len(df) == 0:
+        print("  <empty>")
+        return
+
+    available_cols = [c for c in keep_cols if c in df.columns]
+    if not available_cols:
+        available_cols = list(df.columns)
+
+    def _fmt(x: float) -> str:
+        try:
+            return float_fmt.format(float(x))
+        except Exception:
+            return str(x)
+
+    print(df[available_cols].to_string(index=False, float_format=_fmt))
+
+
+def _report_reputation_tables(
+    runs_df: "pd.DataFrame",
+    nodes_df: "pd.DataFrame",
+    *,
+    out_dir: Optional[Path] = None,
+    show_stdout: bool = True,
+) -> None:
+    if out_dir is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    runs_df = _ensure_report_attack_columns(runs_df.copy())
+    nodes_df = _ensure_report_attack_columns(nodes_df.copy())
+
+    if "method" not in runs_df.columns:
+        runs_df["method"] = "unknown"
+    if "method" not in nodes_df.columns:
+        nodes_df["method"] = "unknown"
+
+    # A) Method comparison by attack (weighted/mean/median/trimmed_mean)
+    table_a_metrics = [
+        "clean_f1",
+        "polluted_f1",
+        "delta_f1",
+        "clean_acc",
+        "polluted_acc",
+        "w_mal",
+    ]
+    table_a = _build_mean_std_table(
+        runs_df,
+        ["attack", "level", "dt_level", "mal_nodes", "method"],
+        table_a_metrics,
+        count_from_completed=True,
+        skip_col="skipped",
+    )
+    table_a_path = out_dir / "table_A_methods.csv" if out_dir is not None else None
+    if len(table_a) > 0:
+        if table_a_path is not None:
+            _write_csv(
+                str(table_a_path),
+                table_a.to_dict(orient="records"),
+                _collect_fieldnames(
+                    table_a.to_dict(orient="records"),
+                    [
+                        "attack",
+                        "level",
+                        "dt_level",
+                        "mal_nodes",
+                        "method",
+                    ]
+                    + [f"{m}_m" for m in table_a_metrics]
+                    + [f"{m}_s" for m in table_a_metrics]
+                    + ["count"],
+                ),
+            )
+
+        if show_stdout:
+            _print_markdown_like_table(
+                "Table A - Methods under attacks",
+                table_a,
+                [
+                    "attack",
+                    "dt_level",
+                    "mal_nodes",
+                    "method",
+                    "clean_f1_m",
+                    "clean_f1_s",
+                    "polluted_f1_m",
+                    "polluted_f1_s",
+                    "delta_f1_m",
+                    "delta_f1_s",
+                    "clean_acc_m",
+                    "clean_acc_s",
+                    "polluted_acc_m",
+                    "polluted_acc_s",
+                    "w_mal_m",
+                    "w_mal_s",
+                    "count",
+                ],
+            )
+
+    # B) Reputation component summary (weighted methods), separated by benign/malicious
+    nodes_rep = nodes_df[nodes_df["method"].astype(str).str.lower().str.startswith("weighted")]
+    table_b_metrics = ["R2", "R4", "Rep", "pi", "KL_q_p", "passed_gate"]
+    table_b = _build_mean_std_table(
+        nodes_rep,
+        ["attack", "level", "dt_level", "mal_nodes", "is_malicious", "method"],
+        table_b_metrics,
+        count_from_completed=False,
+        skip_col="skipped",
+    )
+    table_b_path = (
+        out_dir / "table_B_weighted_reputation_summary.csv" if out_dir is not None else None
+    )
+    if len(table_b) > 0:
+        if table_b_path is not None:
+            _write_csv(
+                str(table_b_path),
+                table_b.to_dict(orient="records"),
+                _collect_fieldnames(
+                    table_b.to_dict(orient="records"),
+                    [
+                        "attack",
+                        "level",
+                        "dt_level",
+                        "mal_nodes",
+                        "is_malicious",
+                        "method",
+                    ]
+                    + [f"{m}_m" for m in table_b_metrics]
+                    + [f"{m}_s" for m in table_b_metrics]
+                    + ["count"],
+                ),
+            )
+
+        if show_stdout:
+            _print_markdown_like_table(
+                "Table B - Weighted reputation components by benign/malicious",
+                table_b,
+                [
+                    "attack",
+                    "dt_level",
+                    "mal_nodes",
+                    "is_malicious",
+                    "method",
+                    "R2_m",
+                    "R2_s",
+                    "R4_m",
+                    "R4_s",
+                    "Rep_m",
+                    "Rep_s",
+                    "pi_m",
+                    "pi_s",
+                    "KL_q_p_m",
+                    "KL_q_p_s",
+                    "passed_gate_m",
+                    "passed_gate_s",
+                    "count",
+                ],
+            )
+
+    # C) Node-level weighted reputation profile (seed-aggregated)
+    table_c = _build_mean_std_table(
+        nodes_rep,
+        ["attack", "level", "dt_level", "mal_nodes", "is_malicious", "method", "node_id"],
+        table_b_metrics,
+        count_from_completed=False,
+        skip_col="skipped",
+    )
+    table_c_path = (
+        out_dir / "table_C_weighted_node_profiles.csv" if out_dir is not None else None
+    )
+    if len(table_c) > 0:
+        if table_c_path is not None:
+            _write_csv(
+                str(table_c_path),
+                table_c.to_dict(orient="records"),
+                _collect_fieldnames(
+                    table_c.to_dict(orient="records"),
+                    [
+                        "attack",
+                        "level",
+                        "dt_level",
+                        "mal_nodes",
+                        "is_malicious",
+                        "method",
+                        "node_id",
+                    ]
+                    + [f"{m}_m" for m in table_b_metrics]
+                    + [f"{m}_s" for m in table_b_metrics]
+                    + ["count"],
+                ),
+            )
+
+        if show_stdout:
+            _print_markdown_like_table(
+                "Table C - Weighted reputation by node",
+                table_c,
+                [
+                    "attack",
+                    "dt_level",
+                    "mal_nodes",
+                    "is_malicious",
+                    "method",
+                    "node_id",
+                    "R2_m",
+                    "R2_s",
+                    "R4_m",
+                    "R4_s",
+                    "Rep_m",
+                    "Rep_s",
+                    "pi_m",
+                    "pi_s",
+                    "KL_q_p_m",
+                    "KL_q_p_s",
+                    "passed_gate_m",
+                    "passed_gate_s",
+                    "count",
+                ],
+            )
 
 
 def _write_csv(path: str, rows: List[Dict], fieldnames: List[str]):
@@ -1541,6 +1780,12 @@ def main():
     ap.add_argument("--out-nodes", type=str, default=None)
     ap.add_argument("--out-fallback-summary", type=str, default="fallback_summary.csv")
     ap.add_argument("--out-passrate-summary", type=str, default="passrate_summary.csv")
+    ap.add_argument(
+        "--no-show-rep-tables",
+        action="store_true",
+        default=False,
+        help="Do not print/save Table A/B/C reputation summary after each exp-group.",
+    )
     ap.add_argument(
         "--out-sensitivity-ref", type=str, default="sensitivity_summary_ref.csv"
     )
@@ -1737,6 +1982,10 @@ def main():
                                                     "clean_f1": float(
                                                         overall["final_f1"]
                                                     ),
+                                                    "delta_f1": float(
+                                                        overall["final_f1"]
+                                                        - overall["eval_f1"]
+                                                    ),
                                                     "w_mal": float(
                                                         overall.get(
                                                             "w_mal", float("nan")
@@ -1827,6 +2076,9 @@ def main():
                                                     "method_detail": str(
                                                         overall.get("method_detail", "")
                                                     ),
+                                                    "rep_config": str(
+                                                        overall.get("rep_config", "")
+                                                    ),
                                                     "mimic_loss": float(
                                                         overall.get(
                                                             "mimic_loss", float("nan")
@@ -1912,6 +2164,7 @@ def main():
         "polluted_f1",
         "clean_acc",
         "clean_f1",
+        "delta_f1",
         "w_mal",
         "w_mal_round_mean",
         "S_DT",
@@ -1929,6 +2182,7 @@ def main():
         "benign_admitted_weight_mass",
         "uses_dt",
         "method_detail",
+        "rep_config",
         "mimic_loss",
         "poison_loss",
         "final_kl_to_teacher",
@@ -1980,6 +2234,7 @@ def main():
         "pi",
         "R2",
         "R2_source",
+        "rep_config",
         "method_detail",
         "uses_dt",
         "mimic_attack_enabled",
@@ -1995,6 +2250,7 @@ def main():
         "dt_level",
         "mal_nodes",
         "method",
+        "rep_config",
         "tau_gate",
         "lambda_m",
         "ref_size",
@@ -2005,6 +2261,7 @@ def main():
         "polluted_f1",
         "clean_acc",
         "clean_f1",
+        "delta_f1",
         "w_mal",
         "w_mal_round_mean",
         "S_DT",
@@ -2089,6 +2346,7 @@ def main():
                     "dt_level",
                     "mal_nodes",
                     "method",
+                    "rep_config",
                     "tau_gate",
                     "lambda_m",
                     "ref_size",
@@ -2285,6 +2543,14 @@ def main():
                 ],
             ),
         )
+
+        if not args.no_show_rep_tables:
+            _report_reputation_tables(
+                runs_df=runs_df,
+                nodes_df=pd.DataFrame(g_nodes),
+                out_dir=group_dir / "tables",
+                show_stdout=True,
+            )
 
     if len(rounds_rows) > 0 or len(nodes_rows) > 0:
         # compatibility with legacy plotting scripts

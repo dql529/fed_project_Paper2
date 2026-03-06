@@ -1,10 +1,10 @@
 {
-  "command": "r4_agg_minitest.py --attack-modes label_flip,stealth_amp,dt_logit_scale --dt-levels D0 --mal-nodes 0,3,5 --methods weighted,mean,median,trimmed_mean,server_val --seeds 0,1,2,3,4",
+  "command": "r4_agg_minitest.py --attack-modes label_flip,stealth_amp,dt_logit_scale --dt-levels D0 --mal-nodes 3,5 --methods weighted --seeds 0,1,2,3,4 --tau-grid 0.6,0.8 --ref-size-grid 128 --audit-size-grid 0 --out-root artifacts --exp-group tau",
   "deploy_variant": 1,
   "dt_support_min": 10,
   "fallback_mode": "median",
   "group": "tau",
-  "group_runs": 0,
+  "group_runs": 60,
   "rounds": 15,
   "scenario": "A",
   "schema": {
@@ -120,19 +120,14 @@
     "D0"
   ],
   "selected_mal_nodes": [
-    0,
     3,
     5
   ],
   "selected_methods": [
-    "weighted",
-    "mean",
-    "median",
-    "trimmed_mean",
-    "server_val"
+    "weighted"
   ],
   "selected_ref_size_grid": [
-    512
+    128
   ],
   "selected_seeds": [
     0,
@@ -142,6 +137,7 @@
     4
   ],
   "selected_tau_grid": [
-    0.7
+    0.6,
+    0.8
   ]
 }

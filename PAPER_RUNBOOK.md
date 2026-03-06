@@ -1,130 +1,99 @@
 # R4-FedAvg Paper Runbook
 
-本文档记录复现实验与图表生成命令，默认在仓库根目录执行。
+This runbook records the paper-facing experiment definitions and the exact commands used to regenerate the final figures and tables.
 
-## 0) 通用说明
+## Today Locked
 
-- 本地环境是 PowerShell，逗号列表务必加引号，例如：
-  - `--attack-modes "label_flip,stealth_amp,dt_logit_scale"`
-  - `--mal-nodes "0,3,5"`
-- 常规默认输出文件：
-  - `runs.csv`（每个 seed 一行）
-  - `summary.csv`（跨 seed 的 mean/std）
-  - `rounds.csv`（每轮日志）
-  - `nodes.csv`（每节点日志）
-  - `fallback_summary.csv`、`passrate_summary.csv`、`sensitivity_summary_ref.csv`、`sensitivity_summary_audit.csv`（新增）
+- Main method: `weighted = R2 + R4`
+- Paper ablation: `weighted_r4only = R4-only`
+- `R3` is disabled in the final paper configuration because its contribution is negligible in this task setting
+- Default paper setting: `D0`, `tau_gate=0.70`, `fallback=median`
+- Mainline attacks: `label_flip`, `stealth_amp`, `dt_logit_scale`
 
-> 当输出文件名通过 `--out-*` 覆盖时，绘图脚本需同步传入同一套路径。
+## Output Layout
 
-## 1) 基线复现（快速回归）
+- Grouped experiment outputs are written under `artifacts/<group>/`
+- Paper-facing tables are written under `artifacts/paper_tables/`
+- Paper-facing figures are written under `artifacts/paper/<group>/`
 
-```bat
-python r4_agg_minitest.py --attack-modes "label_flip,stealth_amp,dt_logit_scale" --dt-levels "D0,D1,D2" --mal-nodes "0,3,5" --methods weighted --seeds "0,1,2,3,4"
-```
-
-对应图：
-```bat
-python paper_figs.py --figs 1,2,3 --dt D0 --out-dir paper_figs
-```
-
-## 2) DT 支撑度 + fallback 统计（S_DT）
+## Mainline Base Run
 
 ```bat
-python r4_agg_minitest.py --attack-modes "label_flip,stealth_amp,dt_logit_scale" --dt-levels D0 --mal-nodes 0,3,5 --methods weighted --seeds 0,1,2,3,4 --ref-size-grid "32,64,128,256,512"
+python r4_agg_minitest.py --attack-modes "label_flip,stealth_amp,dt_logit_scale" --dt-levels D0 --mal-nodes "0,3,5" --methods "weighted,mean,median,trimmed_mean" --seeds "0,1,2,3,4" --ref-size-grid "128" --audit-size-grid "0" --out-root artifacts --exp-group base
 ```
 
-检查：
-- `rounds.csv` 包含 `S_DT`、`fallback_flag`、`num_masked`、`num_valid`、`tau_gate`、`benign_pass_rate`、`malicious_pass_rate`、`benign_admitted_weight_mass`。
-- `fallback_summary.csv` / `runs.csv` 中有 `fallback_rate`。
-
-绘图：
-```bat
-python paper_figs.py --figs 5 --dt D0 --f-sdt 5 --methods weighted
-```
-
-## 3) 统一 τ 门限敏感性（`f=5`，含 3 攻击）
+## Mainline Paper Figures
 
 ```bat
-python r4_agg_minitest.py --attack-modes "label_flip,stealth_amp,dt_logit_scale" --dt-levels D0,D1,D2 --mal-nodes 5 --methods weighted --seeds 0,1,2,3,4 --tau-grid "0.3,0.4,0.5,0.6,0.7,0.8"
+python paper_figs.py --figs 1,2,3 --dt D0 --exp-group base --out-dir artifacts/paper/base
 ```
 
-绘图（清洁宏 F1、`W_mal`、`benign` 误杀率）：
-```bat
-python paper_figs.py --figs 6 --dt D1 --methods weighted --attacks "label_flip,stealth_amp,dt_logit_scale"
-```
+Figure notes:
 
-也可用：
-```bat
-python plot_from_csv.py --summary summary.csv --runs runs.csv --tau-sweep "0.3,0.4,0.5,0.6,0.7,0.8" --dt-levels D0,D1,D2
-```
+- `Fig.1`: clean holdout macro-F1 vs `f`
+- `Fig.2`: admitted malicious weight mass `W_mal` vs round
+- `Fig.3`: node-level score separation under `label_flip, f=5`, showing `pi_norm` and `R4`
 
-## 4) server_validation 基线（与 weighted 对齐）
+## Supplementary Experiment A: R2+R4 vs R4-only
+
+Three attacks at `f=5`:
 
 ```bat
-python r4_agg_minitest.py --attack-modes "label_flip,stealth_amp,dt_logit_scale" --dt-levels D0,D1,D2 --mal-nodes 0,3,5 --methods "weighted,server_val" --seeds 0,1,2,3,4
+python r4_agg_minitest.py --attack-modes "label_flip,stealth_amp,dt_logit_scale" --dt-levels D0 --mal-nodes "5" --methods "weighted,weighted_r4only" --seeds "0,1,2,3,4" --ref-size-grid "128" --audit-size-grid "0" --out-root artifacts/appendix_ablation --exp-group base
 ```
 
-可与 weighted 同图比较（示例）：
-```bat
-python paper_figs.py --figs 1 --dt D1 --methods weighted,server_val --attacks "label_flip,stealth_amp,dt_logit_scale"
-```
-
-## 5) Krum/Bulyan 条件化启用
-
-### 5.1 仅 f=3
+Weak-spot check at `label_flip, f=3`:
 
 ```bat
-python r4_agg_minitest.py --attack-modes "label_flip,dt_logit_scale" --dt-levels D1 --mal-nodes 3 --methods krum,bulyan --seeds 0,1,2,3,4 --tau-grid "0.5"
+python r4_agg_minitest.py --attack-modes "label_flip" --dt-levels D0 --mal-nodes "3" --methods "weighted,weighted_r4only" --seeds "0,1,2,3,4" --ref-size-grid "128" --audit-size-grid "0" --out-root artifacts/appendix_ablation_lf3 --exp-group base
 ```
 
-### 5.2 f=5 触发 skip/条件跳过
+## Supplementary Experiment B: Tau Sanity Check
+
+Only run `label_flip, f=3`:
 
 ```bat
-python r4_agg_minitest.py --attack-modes "label_flip,dt_logit_scale" --dt-levels D1 --mal-nodes 5 --methods krum,bulyan --seeds 0,1,2,3,4 --tau-grid "0.5"
+python r4_agg_minitest.py --attack-modes "label_flip" --dt-levels D0 --mal-nodes "3" --methods "weighted" --seeds "0,1,2,3,4" --tau-grid "0.6,0.7" --ref-size-grid "128" --audit-size-grid "0" --out-root artifacts/appendix_taucheck --exp-group tau
 ```
 
-检查 `runs.csv`/终端输出有 `skipped=True` 与 `skip_reason`。
+Stopping rule:
 
-## 6) adaptive mimic 攻击（λ 扫描）
+- If `tau=0.60` improves `polluted_f1` by less than `0.02`, stop tuning
+- If `tau=0.60` improves `benign_pass_rate` by less than `0.05`, stop tuning
+- Main paper configuration remains `tau=0.70`
+
+## Paper Analysis Tables
 
 ```bat
-python r4_agg_minitest.py --attack-modes adaptive_mimic --dt-levels D0,D1,D2 --mal-nodes 0,3,5 --methods weighted --seeds 0,1,2,3,4 --adaptive-mimic-lambdas "0.1,1,10"
+python paper_analysis.py --base-dir artifacts/base --ablation-dir artifacts/appendix_ablation/base --ablation-extra-dir artifacts/appendix_ablation_lf3/base --tau-dir artifacts/appendix_taucheck/tau --out-dir artifacts/paper_tables --dt D0 --main-method weighted --baseline median --node-attack label_flip --node-f 5
 ```
 
-绘图：
-```bat
-python paper_figs.py --figs 9 --dt D1 --methods weighted --attacks adaptive_mimic --lambda-m 1 --ref-size 128
-```
+This command writes:
 
-（`--lambda-m` 为过滤参数，未给则绘制全部扫描点。）
+- `table_main_performance.csv`
+- `table_ablation_r4only.csv`
+- `table_mechanism.csv`
+- `table_stats_weighted_vs_median.csv`
+- `table_seed_results.csv`
+- `table_tau_sanity.csv`
+- `node_plot_data_label_flip_f5.csv`
 
-## 7) 参考集规模与审计集规模敏感性
+## Statistical Unit
 
-```bat
-python r4_agg_minitest.py --attack-modes "label_flip,dt_logit_scale" --dt-levels D1 --mal-nodes 3 --methods weighted --seeds 0,1,2,3,4 --ref-size-grid "32,64,128,256,512" --audit-size-grid "0,32,64,128,256"
-```
+- All inferential statistics are computed at the `seed` level
+- Round-level traces are not treated as independent samples
+- The paper-facing significance comparison is `weighted` vs `median`
 
-绘图：
-```bat
-python paper_figs.py --figs 8 --dt D1 --f-fig2 3 --ref-size 128 --audit-size 64 --tau-gate 0.7
-```
+## Mainline Scope
 
-> 重点检查：`--audit-size-grid 0` 条件下 `R2_source` 在 `nodes.csv`/`runs.csv` 是否为 `"none"`。
+Keep the main paper focused on:
 
-## 8) 统计检验说明（论文方法）
+- One main performance table
+- One mechanism table
+- One node-level separation figure
 
-- 轮次级别是同一 seed 下的时间序列，不可直接作为独立样本用于参数显著性检验。
-- 显著性比较（均值差异/相关性）以 `seed` 作为独立单元。
-- `summary/fallback_summary/passrate_summary/sensitivity_summary_*` 在聚合阶段均基于 `runs.csv` 的 seed 级记录（`_m` 与 `_s` 为 seed 维度统计量）。
+Do not reintroduce:
 
-## 9) 图示总览映射（便于复现）
-
-- Fig.1：`python paper_figs.py --figs 1 --dt D0`
-- Fig.2：`python paper_figs.py --figs 2 --dt D0 --f-fig2 5`
-- Fig.3：`python paper_figs.py --figs 3 --dt D0 --mal-nodes 5`（若需可在命令中调整 `--mal-nodes`）
-- Fig.4：`python paper_figs.py --figs 4 --dt D0 --ablation-attacks "label_flip,dt_logit_scale"`
-- Fig.5：`python paper_figs.py --figs 5 --dt D0 --f-sdt 5`
-- Fig.6：`python paper_figs.py --figs 6 --dt D0`
-- Fig.7：`python paper_figs.py --figs 7 --dt D0 --f-fig2 5`
-- Fig.8：`python paper_figs.py --figs 8 --dt D0 --f-fig2 5`
-- Fig.9：`python paper_figs.py --figs 9 --dt D0`
+- `R3` as an active paper component
+- `weighted_r2only` as a paper ablation
+- large tau sweeps or broad parameter grids
