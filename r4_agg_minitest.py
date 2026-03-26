@@ -37,6 +37,7 @@ EXPERIMENT_GROUPS = [
     "krum",
     "mimic",
     "refaudit",
+    "heterobenign",
 ]
 
 REQUIRED_ROUNDS_COLS = [
@@ -56,6 +57,13 @@ REQUIRED_ROUNDS_COLS = [
     "benign_pass_rate",
     "malicious_pass_rate",
     "benign_admitted_weight_mass",
+    "benign_noise_profile",
+    "benign_noise_active",
+    "benign_deploy_noise_profile",
+    "benign_deploy_noise_active",
+    "beta_r2",
+    "beta_r4",
+    "mix_r4_beta",
 ]
 
 REQUIRED_NODES_COLS = [
@@ -70,6 +78,17 @@ REQUIRED_NODES_COLS = [
     "pi",
     "R2",
     "R2_source",
+    "node_noise_role",
+    "node_noise_spec",
+    "benign_noise_profile",
+    "noise_family",
+    "deploy_noise_role",
+    "deploy_noise_spec",
+    "benign_deploy_noise_profile",
+    "benign_deploy_noise_active",
+    "beta_r2",
+    "beta_r4",
+    "mix_r4_beta",
 ]
 
 
@@ -105,6 +124,15 @@ def _coerce_float_matrix(values: Sequence) -> List[float]:
     return out
 
 
+def _benign_noise_profile_active(profile: Optional[Sequence[str]]) -> bool:
+    if not profile:
+        return False
+    for token in profile:
+        if str(token).strip().lower() not in {"", "clean", "none"}:
+            return True
+    return False
+
+
 def _infer_group(
     *,
     method: str,
@@ -113,7 +141,13 @@ def _infer_group(
     tau_grid: Sequence[float],
     ref_grid: Sequence[int],
     audit_grid: Sequence[int],
+    benign_noise_profile: Optional[Sequence[str]] = None,
+    benign_deploy_noise_profile: Optional[Sequence[str]] = None,
 ) -> str:
+    if _benign_noise_profile_active(benign_noise_profile) or _benign_noise_profile_active(
+        benign_deploy_noise_profile
+    ):
+        return "heterobenign"
     if method == "server_val":
         return "server_val"
     if method in {"krum", "bulyan", "byzantine_median"}:
@@ -425,8 +459,16 @@ def _geo_aggregation(models: List[torch.nn.Module], mode: str):
 
 
 def _need_r2_data(
-    use_reputation: bool, audit_size: Optional[int], audit_size_used: int
+    use_reputation: bool,
+    audit_size: Optional[int],
+    audit_size_used: int,
+    r2_source_override: Optional[str] = None,
 ):
+    override = str(r2_source_override or "").strip().lower()
+    if override and override != "auto":
+        if override not in {"none", "local_test", "server_audit"}:
+            raise ValueError(f"Unsupported r2_source_override={r2_source_override}")
+        return override
     if not use_reputation:
         return "none"
     if audit_size is None:
@@ -462,10 +504,15 @@ def run_once(
     adaptive_mimic_lambda: float = 0.0,
     ref_size: Optional[int] = None,
     audit_size: Optional[int] = None,
+    r2_source_override: Optional[str] = None,
     diag: Optional[List[Dict]] = None,
     round_rows: Optional[List[Dict]] = None,
     node_rows: Optional[List[Dict]] = None,
     meta: Optional[Dict] = None,
+    benign_noise_profile: Optional[Sequence[str]] = None,
+    benign_noise_alias_map: Optional[Dict[str, str]] = None,
+    benign_deploy_noise_profile: Optional[Sequence[str]] = None,
+    benign_deploy_noise_alias_map: Optional[Dict[str, str]] = None,
     return_extra: bool = True,
 ) -> Tuple[Dict, Dict]:
     method = str(method).strip().lower()
@@ -486,6 +533,53 @@ def run_once(
     method_detail = str((meta or {}).get("method_detail", ""))
     used_attack_mode = str(attack_mode)
     uses_dt = False
+    benign_noise_profile_tokens = [
+        str(x).strip() for x in (benign_noise_profile or []) if str(x).strip()
+    ]
+    benign_noise_profile_label = ",".join(benign_noise_profile_tokens)
+    benign_noise_active = _benign_noise_profile_active(benign_noise_profile_tokens)
+    benign_deploy_noise_profile_tokens = [
+        str(x).strip() for x in (benign_deploy_noise_profile or []) if str(x).strip()
+    ]
+    benign_deploy_noise_profile_label = ",".join(benign_deploy_noise_profile_tokens)
+    benign_deploy_noise_active = _benign_noise_profile_active(
+        benign_deploy_noise_profile_tokens
+    )
+    resolved_noise_specs = []
+    for token in benign_noise_profile_tokens:
+        lowered = str(token).strip().lower()
+        if benign_noise_alias_map is not None and lowered in benign_noise_alias_map:
+            resolved_noise_specs.append(str(benign_noise_alias_map[lowered]).strip())
+        else:
+            resolved_noise_specs.append(str(token).strip())
+    resolved_deploy_noise_specs = []
+    for token in benign_deploy_noise_profile_tokens:
+        lowered = str(token).strip().lower()
+        if (
+            benign_deploy_noise_alias_map is not None
+            and lowered in benign_deploy_noise_alias_map
+        ):
+            resolved_deploy_noise_specs.append(
+                str(benign_deploy_noise_alias_map[lowered]).strip()
+            )
+        else:
+            resolved_deploy_noise_specs.append(str(token).strip())
+    noise_family = ""
+    if benign_noise_active or benign_deploy_noise_active:
+        all_resolved_specs = resolved_noise_specs + resolved_deploy_noise_specs
+        noise_family = (
+            "drift"
+            if any(
+                str(spec).strip().lower().startswith("drift_")
+                for spec in all_resolved_specs
+            )
+            else "iid"
+        )
+    effective_beta_r2 = float((meta or {}).get("beta_r2", getattr(C, "BETA_R2", 0.0)))
+    effective_beta_r4 = float((meta or {}).get("beta_r4", getattr(C, "BETA_R4", 0.0)))
+    effective_mix_r4_beta = float(
+        (meta or {}).get("mix_r4_beta", getattr(C, "MIX_R4_BETA", 0.0))
+    )
 
     use_reputation = method.startswith("weighted")
     server_val = method == "server_val"
@@ -604,6 +698,22 @@ def run_once(
             attack_mode=attack_mode,
             label_flip_ratio=float(getattr(C, "LABEL_FLIP_RATIO", 0.0)),
             pre_split_poison=bool(getattr(C, "PRE_SPLIT_POISON", False)),
+            benign_noise_profile=benign_noise_profile_tokens,
+            benign_noise_alias_map=benign_noise_alias_map,
+            benign_deploy_noise_profile=benign_deploy_noise_profile_tokens,
+            benign_deploy_noise_alias_map=benign_deploy_noise_alias_map,
+        )
+        benign_clean_nodes = sum(
+            1 for obj in node_data_objects if str(obj.get("noise_role", "")) == "benign_clean"
+        )
+        benign_light_nodes = sum(
+            1 for obj in node_data_objects if str(obj.get("noise_role", "")) == "benign_light"
+        )
+        benign_medium_nodes = sum(
+            1 for obj in node_data_objects if str(obj.get("noise_role", "")) == "benign_medium"
+        )
+        benign_heavy_nodes = sum(
+            1 for obj in node_data_objects if str(obj.get("noise_role", "")) == "benign_heavy"
         )
 
         ref_x_full, ref_y_full = load_reference_data(C.GLOBAL_REF_CSV)
@@ -688,7 +798,12 @@ def run_once(
         )
         _raise_if_leaked(split_prefix, split_summary)
 
-        r2_source = _need_r2_data(use_reputation, audit_size, audit_size_used)
+        r2_source = _need_r2_data(
+            use_reputation,
+            audit_size,
+            audit_size_used,
+            r2_source_override=r2_source_override,
+        )
 
         clean_eval_x = torch.cat([d["test"].x for d in node_data_objects], dim=0)
         clean_eval_y = torch.cat([d["test"].y for d in node_data_objects], dim=0)
@@ -745,6 +860,13 @@ def run_once(
                 drone_id=i,
                 is_malicious=(i < C.MALICIOUS_NODES),
                 attack_mode=attack_mode,
+                max_amp=float(getattr(C, "STEALTH_MAX_AMP", 1.0)),
+                amp_step=float(getattr(C, "STEALTH_AMP_STEP", 0.20)),
+                noise_base=float(getattr(C, "STEALTH_NOISE_BASE", 0.07)),
+                noise_step=float(getattr(C, "STEALTH_NOISE_STEP", 0.07)),
+                subspace_ratio=float(getattr(C, "STEALTH_SUBSPACE_RATIO", 1.0)),
+                bridge_scale=float(getattr(C, "STEALTH_BRIDGE_SCALE", 0.0)),
+                anchor_mix=float(getattr(C, "STEALTH_ANCHOR_MIX", 0.0)),
                 adaptive_mimic_lambda=(
                     adaptive_mimic_lambda if attack_mode == "adaptive_mimic" else 0.0
                 ),
@@ -1083,42 +1205,6 @@ def run_once(
                 raise ValueError(f"Unknown method: {method}")
 
             w_mal_rounds.append(float(w_mal if np.isfinite(w_mal) else 0.0))
-            if round_rows is not None:
-                round_rows.append(
-                    {
-                        "attack": (meta or {}).get("attack", attack_mode),
-                        "attack_mode": str((meta or {}).get("attack", attack_mode)),
-                        "exp_group": str((meta or {}).get("exp_group", "")),
-                        "level": (meta or {}).get("level", ""),
-                        "dt_level": str((meta or {}).get("dt_level", dt_level)),
-                        "mal_nodes": int(
-                            (meta or {}).get("mal_nodes", C.MALICIOUS_NODES)
-                        ),
-                        "method": (meta or {}).get("method", method),
-                        "seed": int((meta or {}).get("seed", seed)),
-                        "tau_gate": float(effective_tau),
-                        "lambda_m": float(adaptive_mimic_lambda),
-                        "ref_size": int(r4_ref_x.shape[0]),
-                        "audit_size": int(audit_size),
-                        "round": int(r),
-                        "w_mal": float(w_mal),
-                        "W_mal": float(w_mal),
-                        "S_DT": float(S_DT),
-                        "S_DT_ratio": float(S_DT_ratio),
-                        "fallback_flag": int(fallback_flag),
-                        "fallback_method": str(fallback_method),
-                        "skip_semantic": int(1 if skip_semantic else 0),
-                        "valid_ratio": float(valid_ratio),
-                        "num_masked": int(num_masked),
-                        "num_valid": int(num_valid),
-                        "benign_pass_rate": float(b_pass),
-                        "malicious_pass_rate": float(m_pass),
-                        "benign_admitted_weight_mass": float(b_mass),
-                        "uses_dt": bool(uses_dt),
-                        "method_detail": str(method_detail),
-                        "rep_config": str(rep_config),
-                    }
-                )
 
             if diag is not None and method in {
                 "byzantine_median",
@@ -1188,6 +1274,144 @@ def run_once(
 
             server.global_model.load_state_dict(agg_sd)
 
+            round_clean_acc, round_clean_f1 = eval_model(
+                server.global_model, clean_eval_x, clean_eval_y
+            )
+            round_deploy_acc, round_deploy_f1 = eval_model(
+                server.global_model, dep_x, dep_y
+            )
+            if use_reputation and last_rep:
+                benign_rep_vals = [
+                    float(last_rep.get(i, float("nan"))) for i in benign_ids
+                ]
+                malicious_rep_vals = [
+                    float(last_rep.get(i, float("nan"))) for i in malicious_ids
+                ]
+                benign_r4_vals = [
+                    float(last_comp.get(i, (float("nan"), float("nan"), float("nan")))[2])
+                    for i in benign_ids
+                ]
+                malicious_r4_vals = [
+                    float(last_comp.get(i, (float("nan"), float("nan"), float("nan")))[2])
+                    for i in malicious_ids
+                ]
+                round_benign_rep = float(np.nanmean(benign_rep_vals)) if benign_rep_vals else float("nan")
+                round_malicious_rep = float(np.nanmean(malicious_rep_vals)) if malicious_rep_vals else float("nan")
+                round_benign_r4 = float(np.nanmean(benign_r4_vals)) if benign_r4_vals else float("nan")
+                round_malicious_r4 = float(np.nanmean(malicious_r4_vals)) if malicious_r4_vals else float("nan")
+            else:
+                round_benign_rep = float("nan")
+                round_malicious_rep = float("nan")
+                round_benign_r4 = float("nan")
+                round_malicious_r4 = float("nan")
+
+            if round_rows is not None:
+                round_rows.append(
+                    {
+                        "attack": (meta or {}).get("attack", attack_mode),
+                        "attack_mode": str((meta or {}).get("attack", attack_mode)),
+                        "exp_group": str((meta or {}).get("exp_group", "")),
+                        "level": (meta or {}).get("level", ""),
+                        "dt_level": str((meta or {}).get("dt_level", dt_level)),
+                        "mal_nodes": int(
+                            (meta or {}).get("mal_nodes", C.MALICIOUS_NODES)
+                        ),
+                        "method": (meta or {}).get("method", method),
+                        "seed": int((meta or {}).get("seed", seed)),
+                        "tau_gate": float(effective_tau),
+                        "lambda_m": float(adaptive_mimic_lambda),
+                        "ref_size": int(r4_ref_x.shape[0]),
+                        "audit_size": int(audit_size),
+                        "round": int(r),
+                        "w_mal": float(w_mal),
+                        "W_mal": float(w_mal),
+                        "round_clean_acc": float(round_clean_acc),
+                        "round_clean_f1": float(round_clean_f1),
+                        "round_polluted_acc": float(round_deploy_acc),
+                        "round_polluted_f1": float(round_deploy_f1),
+                        "round_benign_rep": float(round_benign_rep),
+                        "round_malicious_rep": float(round_malicious_rep),
+                        "round_benign_r4": float(round_benign_r4),
+                        "round_malicious_r4": float(round_malicious_r4),
+                        "S_DT": float(S_DT),
+                        "S_DT_ratio": float(S_DT_ratio),
+                        "fallback_flag": int(fallback_flag),
+                        "fallback_method": str(fallback_method),
+                        "skip_semantic": int(1 if skip_semantic else 0),
+                        "valid_ratio": float(valid_ratio),
+                        "num_masked": int(num_masked),
+                        "num_valid": int(num_valid),
+                        "benign_pass_rate": float(b_pass),
+                        "malicious_pass_rate": float(m_pass),
+                        "benign_admitted_weight_mass": float(b_mass),
+                        "uses_dt": bool(uses_dt),
+                        "method_detail": str(method_detail),
+                        "rep_config": str(rep_config),
+                        "benign_noise_profile": str(benign_noise_profile_label),
+                        "benign_noise_active": int(1 if benign_noise_active else 0),
+                        "benign_deploy_noise_profile": str(
+                            benign_deploy_noise_profile_label
+                        ),
+                        "benign_deploy_noise_active": int(
+                            1 if benign_deploy_noise_active else 0
+                        ),
+                        "noise_family": str(noise_family),
+                        "beta_r2": float(effective_beta_r2),
+                        "beta_r4": float(effective_beta_r4),
+                        "mix_r4_beta": float(effective_mix_r4_beta),
+                        "stealth_max_amp": float(
+                            (meta or {}).get(
+                                "stealth_max_amp",
+                                getattr(C, "STEALTH_MAX_AMP", float("nan")),
+                            )
+                        ),
+                        "stealth_amp_step": float(
+                            (meta or {}).get(
+                                "stealth_amp_step",
+                                getattr(C, "STEALTH_AMP_STEP", float("nan")),
+                            )
+                        ),
+                        "stealth_noise_base": float(
+                            (meta or {}).get(
+                                "stealth_noise_base",
+                                getattr(C, "STEALTH_NOISE_BASE", float("nan")),
+                            )
+                        ),
+                        "stealth_noise_step": float(
+                            (meta or {}).get(
+                                "stealth_noise_step",
+                                getattr(C, "STEALTH_NOISE_STEP", float("nan")),
+                            )
+                        ),
+                        "dt_attack_scale_start": float(
+                            (meta or {}).get(
+                                "dt_attack_scale_start",
+                                getattr(C, "DT_ATTACK_SCALE_START", float("nan")),
+                            )
+                        ),
+                        "dt_attack_scale_end": float(
+                            (meta or {}).get(
+                                "dt_attack_scale_end",
+                                getattr(C, "DT_ATTACK_SCALE_END", float("nan")),
+                            )
+                        ),
+                        "dt_attack_scale_step": float(
+                            (meta or {}).get(
+                                "dt_attack_scale_step",
+                                getattr(C, "DT_ATTACK_SCALE_STEP", float("nan")),
+                            )
+                        ),
+                        "label_flip_grad_scale": float(
+                            (meta or {}).get(
+                                "label_flip_grad_scale",
+                                getattr(C, "MAL_GRAD_SCALE_MAP", {}).get(
+                                    "label_flip", getattr(C, "MAL_GRAD_SCALE", float("nan"))
+                                ),
+                            )
+                        ),
+                    }
+                )
+
         clean_acc, clean_f1 = eval_model(
             server.global_model, clean_eval_x, clean_eval_y
         )
@@ -1206,6 +1430,7 @@ def run_once(
                 passed_gate = int(not bool(server.last_r4_gate_hit.get(nid, False))) if need_r4 else 1
                 pi = float(last_rep.get(nid, float("nan")))
                 payload = node.last_attack_payload if hasattr(node, "last_attack_payload") else {}
+                node_meta = node_data_objects[nid] if 0 <= nid < len(node_data_objects) else {}
                 node_rows.append(
                     {
                         "attack": (meta or {}).get("attack", attack_mode),
@@ -1240,6 +1465,75 @@ def run_once(
                         "R2_source": str(r2_source),
                         "method_detail": str(method_detail),
                         "uses_dt": bool(uses_dt),
+                        "node_noise_role": str(node_meta.get("noise_role", "")),
+                        "node_noise_spec": str(node_meta.get("noise_spec", "")),
+                        "benign_noise_profile": str(benign_noise_profile_label),
+                        "noise_family": str(noise_family),
+                        "deploy_noise_role": str(
+                            node_meta.get("deploy_noise_role", "")
+                        ),
+                        "deploy_noise_spec": str(
+                            node_meta.get("deploy_noise_spec", "")
+                        ),
+                        "benign_deploy_noise_profile": str(
+                            benign_deploy_noise_profile_label
+                        ),
+                        "benign_deploy_noise_active": int(
+                            1 if benign_deploy_noise_active else 0
+                        ),
+                        "beta_r2": float(effective_beta_r2),
+                        "beta_r4": float(effective_beta_r4),
+                        "mix_r4_beta": float(effective_mix_r4_beta),
+                        "stealth_max_amp": float(
+                            (meta or {}).get(
+                                "stealth_max_amp",
+                                getattr(C, "STEALTH_MAX_AMP", float("nan")),
+                            )
+                        ),
+                        "stealth_amp_step": float(
+                            (meta or {}).get(
+                                "stealth_amp_step",
+                                getattr(C, "STEALTH_AMP_STEP", float("nan")),
+                            )
+                        ),
+                        "stealth_noise_base": float(
+                            (meta or {}).get(
+                                "stealth_noise_base",
+                                getattr(C, "STEALTH_NOISE_BASE", float("nan")),
+                            )
+                        ),
+                        "stealth_noise_step": float(
+                            (meta or {}).get(
+                                "stealth_noise_step",
+                                getattr(C, "STEALTH_NOISE_STEP", float("nan")),
+                            )
+                        ),
+                        "dt_attack_scale_start": float(
+                            (meta or {}).get(
+                                "dt_attack_scale_start",
+                                getattr(C, "DT_ATTACK_SCALE_START", float("nan")),
+                            )
+                        ),
+                        "dt_attack_scale_end": float(
+                            (meta or {}).get(
+                                "dt_attack_scale_end",
+                                getattr(C, "DT_ATTACK_SCALE_END", float("nan")),
+                            )
+                        ),
+                        "dt_attack_scale_step": float(
+                            (meta or {}).get(
+                                "dt_attack_scale_step",
+                                getattr(C, "DT_ATTACK_SCALE_STEP", float("nan")),
+                            )
+                        ),
+                        "label_flip_grad_scale": float(
+                            (meta or {}).get(
+                                "label_flip_grad_scale",
+                                getattr(C, "MAL_GRAD_SCALE_MAP", {}).get(
+                                    "label_flip", getattr(C, "MAL_GRAD_SCALE", float("nan"))
+                                ),
+                            )
+                        ),
                         "mimic_attack_enabled": float(payload.get("attack_enabled", 0.0)),
                         "mimic_loss": float(payload.get("mimic_loss", float("nan"))),
                         "poison_loss": float(payload.get("poison_loss", float("nan"))),
@@ -1279,11 +1573,24 @@ def run_once(
             "lambda_m": float(adaptive_mimic_lambda),
             "ref_size": int(r4_ref_x.shape[0]),
             "audit_size": int(audit_size_used),
+            "R2_source": str(r2_source),
             "fallback_flag_final": int(fallback_flags[-1]) if fallback_flags else 0,
             "fallback_flag_first": int(fallback_flags[0]) if fallback_flags else int(0),
             "method_detail": str(method_detail),
             "uses_dt": bool(uses_dt),
             "rep_config": str(rep_config),
+            "benign_noise_profile": str(benign_noise_profile_label),
+            "benign_noise_active": int(1 if benign_noise_active else 0),
+            "benign_deploy_noise_profile": str(benign_deploy_noise_profile_label),
+            "benign_deploy_noise_active": int(1 if benign_deploy_noise_active else 0),
+            "noise_family": str(noise_family),
+            "beta_r2": float(effective_beta_r2),
+            "beta_r4": float(effective_beta_r4),
+            "mix_r4_beta": float(effective_mix_r4_beta),
+            "benign_clean_nodes": int(benign_clean_nodes),
+            "benign_light_nodes": int(benign_light_nodes),
+            "benign_medium_nodes": int(benign_medium_nodes),
+            "benign_heavy_nodes": int(benign_heavy_nodes),
             "mimic_loss": _nanmean_or_nan(mimic_losses),
             "poison_loss": _nanmean_or_nan(poison_losses),
             "final_kl_to_teacher": _nanmean_or_nan(final_kls),
@@ -1416,6 +1723,18 @@ def _report_reputation_tables(
         runs_df["method"] = "unknown"
     if "method" not in nodes_df.columns:
         nodes_df["method"] = "unknown"
+    if "node_noise_role" not in nodes_df.columns:
+        nodes_df["node_noise_role"] = np.where(
+            nodes_df.get("is_malicious", 0).astype(int) == 1,
+            "malicious",
+            "benign_clean",
+        )
+    if "node_noise_spec" not in nodes_df.columns:
+        nodes_df["node_noise_spec"] = np.where(
+            nodes_df["node_noise_role"].astype(str) == "malicious",
+            "malicious",
+            "clean",
+        )
 
     # A) Method comparison by attack (weighted/mean/median/trimmed_mean)
     table_a_metrics = [
@@ -1542,7 +1861,17 @@ def _report_reputation_tables(
     # C) Node-level weighted reputation profile (seed-aggregated)
     table_c = _build_mean_std_table(
         nodes_rep,
-        ["attack", "level", "dt_level", "mal_nodes", "is_malicious", "method", "node_id"],
+        [
+            "attack",
+            "level",
+            "dt_level",
+            "mal_nodes",
+            "is_malicious",
+            "node_noise_role",
+            "node_noise_spec",
+            "method",
+            "node_id",
+        ],
         table_b_metrics,
         count_from_completed=False,
         skip_col="skipped",
@@ -1563,6 +1892,8 @@ def _report_reputation_tables(
                         "dt_level",
                         "mal_nodes",
                         "is_malicious",
+                        "node_noise_role",
+                        "node_noise_spec",
                         "method",
                         "node_id",
                     ]
@@ -1581,8 +1912,68 @@ def _report_reputation_tables(
                     "dt_level",
                     "mal_nodes",
                     "is_malicious",
+                    "node_noise_role",
+                    "node_noise_spec",
                     "method",
                     "node_id",
+                    "R2_m",
+                    "R2_s",
+                    "R4_m",
+                    "R4_s",
+                    "Rep_m",
+                    "Rep_s",
+                    "pi_m",
+                    "pi_s",
+                    "KL_q_p_m",
+                    "KL_q_p_s",
+                    "passed_gate_m",
+                    "passed_gate_s",
+                    "count",
+                ],
+            )
+
+    # D) Noise-role view for weighted methods
+    table_d = _build_mean_std_table(
+        nodes_rep,
+        ["attack", "level", "dt_level", "mal_nodes", "method", "node_noise_role"],
+        table_b_metrics,
+        count_from_completed=False,
+        skip_col="skipped",
+    )
+    table_d_path = (
+        out_dir / "table_D_weighted_noise_roles.csv" if out_dir is not None else None
+    )
+    if len(table_d) > 0:
+        if table_d_path is not None:
+            _write_csv(
+                str(table_d_path),
+                table_d.to_dict(orient="records"),
+                _collect_fieldnames(
+                    table_d.to_dict(orient="records"),
+                    [
+                        "attack",
+                        "level",
+                        "dt_level",
+                        "mal_nodes",
+                        "method",
+                        "node_noise_role",
+                    ]
+                    + [f"{m}_m" for m in table_b_metrics]
+                    + [f"{m}_s" for m in table_b_metrics]
+                    + ["count"],
+                ),
+            )
+
+        if show_stdout:
+            _print_markdown_like_table(
+                "Table D - Weighted reputation by node noise role",
+                table_d,
+                [
+                    "attack",
+                    "dt_level",
+                    "mal_nodes",
+                    "method",
+                    "node_noise_role",
                     "R2_m",
                     "R2_s",
                     "R4_m",
@@ -1687,7 +2078,7 @@ def main():
         "--exp-group",
         type=str,
         default="auto",
-        help="Comma list of experiment groups: auto | base | sdt | tau | server_val | krum | mimic | refaudit",
+        help="Comma list of experiment groups: auto | base | sdt | tau | server_val | krum | mimic | refaudit | heterobenign",
     )
     ap.add_argument(
         "--methods",
@@ -1774,6 +2165,145 @@ def main():
         help="Comma list of server audit set sizes. "
         "For sensitivity sweep, pass explicit list.",
     )
+    ap.add_argument(
+        "--r2-source",
+        type=str,
+        choices=["auto", "none", "local_test", "server_audit"],
+        default="auto",
+        help="Explicit R2 performance source override. 'auto' keeps legacy audit-size-driven behavior.",
+    )
+    ap.add_argument(
+        "--benign-noise-profile",
+        type=str,
+        default="",
+        help="Comma list applied to benign nodes only, e.g. light,light,medium,medium,heavy,clean,clean",
+    )
+    ap.add_argument(
+        "--benign-noise-light-spec",
+        type=str,
+        default="drift_light",
+        help="Noise spec used when benign-noise-profile contains 'light'",
+    )
+    ap.add_argument(
+        "--benign-noise-medium-spec",
+        type=str,
+        default="drift_medium",
+        help="Noise spec used when benign-noise-profile contains 'medium'",
+    )
+    ap.add_argument(
+        "--benign-noise-heavy-spec",
+        type=str,
+        default="drift_heavy",
+        help="Noise spec used when benign-noise-profile contains 'heavy'",
+    )
+    ap.add_argument(
+        "--benign-deploy-noise-profile",
+        type=str,
+        default="",
+        help="Comma list applied to benign local-test/deploy clone only",
+    )
+    ap.add_argument(
+        "--benign-deploy-noise-light-spec",
+        type=str,
+        default="drift_light",
+        help="Deploy-noise spec used when benign-deploy-noise-profile contains 'light'",
+    )
+    ap.add_argument(
+        "--benign-deploy-noise-medium-spec",
+        type=str,
+        default="drift_medium_v2",
+        help="Deploy-noise spec used when benign-deploy-noise-profile contains 'medium'",
+    )
+    ap.add_argument(
+        "--benign-deploy-noise-heavy-spec",
+        type=str,
+        default="drift_heavy_v2",
+        help="Deploy-noise spec used when benign-deploy-noise-profile contains 'heavy'",
+    )
+    ap.add_argument(
+        "--beta-r2",
+        type=float,
+        default=None,
+        help="Optional override for BETA_R2",
+    )
+    ap.add_argument(
+        "--beta-r4",
+        type=float,
+        default=None,
+        help="Optional override for BETA_R4",
+    )
+    ap.add_argument(
+        "--mix-r4-beta",
+        type=float,
+        default=None,
+        help="Optional override for MIX_R4_BETA",
+    )
+    ap.add_argument(
+        "--stealth-max-amp",
+        type=float,
+        default=None,
+        help="Optional override for STEALTH_MAX_AMP",
+    )
+    ap.add_argument(
+        "--stealth-amp-step",
+        type=float,
+        default=None,
+        help="Optional override for STEALTH_AMP_STEP",
+    )
+    ap.add_argument(
+        "--stealth-noise-base",
+        type=float,
+        default=None,
+        help="Optional override for STEALTH_NOISE_BASE",
+    )
+    ap.add_argument(
+        "--stealth-noise-step",
+        type=float,
+        default=None,
+        help="Optional override for STEALTH_NOISE_STEP",
+    )
+    ap.add_argument(
+        "--stealth-subspace-ratio",
+        type=float,
+        default=None,
+        help="Optional override for STEALTH_SUBSPACE_RATIO",
+    )
+    ap.add_argument(
+        "--stealth-bridge-scale",
+        type=float,
+        default=None,
+        help="Optional override for STEALTH_BRIDGE_SCALE",
+    )
+    ap.add_argument(
+        "--stealth-anchor-mix",
+        type=float,
+        default=None,
+        help="Optional override for STEALTH_ANCHOR_MIX",
+    )
+    ap.add_argument(
+        "--dt-attack-scale-start",
+        type=float,
+        default=None,
+        help="Optional override for DT_ATTACK_SCALE_START",
+    )
+    ap.add_argument(
+        "--dt-attack-scale-end",
+        type=float,
+        default=None,
+        help="Optional override for DT_ATTACK_SCALE_END",
+    )
+    ap.add_argument(
+        "--dt-attack-scale-step",
+        type=float,
+        default=None,
+        help="Optional override for DT_ATTACK_SCALE_STEP",
+    )
+    ap.add_argument(
+        "--label-flip-grad-scale",
+        type=float,
+        default=None,
+        help="Optional override for MAL_GRAD_SCALE_MAP['label_flip']",
+    )
     ap.add_argument("--out-runs", type=str, default=None)
     ap.add_argument("--out-summary", type=str, default=None)
     ap.add_argument("--out-rounds", type=str, default=None)
@@ -1840,6 +2370,119 @@ def main():
         args.audit_size_grid,
         default=getattr(C, "R2_AUDIT_SIZE_CANDIDATES", [0, 32, 64, 128, 256]),
     )
+    benign_noise_profile = _normalize_cli_list(args.benign_noise_profile)
+    benign_deploy_noise_profile = _normalize_cli_list(args.benign_deploy_noise_profile)
+    benign_noise_alias_map = {
+        "clean": "clean",
+        "none": "clean",
+        "light": str(args.benign_noise_light_spec).strip(),
+        "medium": str(args.benign_noise_medium_spec).strip(),
+        "heavy": str(args.benign_noise_heavy_spec).strip(),
+        "mediump": "drift_medium_pos_v2",
+        "mediumn": "drift_medium_neg_v2",
+        "heavyp": "drift_heavy_pos_v2",
+        "heavyn": "drift_heavy_neg_v2",
+    }
+    benign_deploy_noise_alias_map = {
+        "clean": "clean",
+        "none": "clean",
+        "light": str(args.benign_deploy_noise_light_spec).strip(),
+        "medium": str(args.benign_deploy_noise_medium_spec).strip(),
+        "heavy": str(args.benign_deploy_noise_heavy_spec).strip(),
+        "mediump": "drift_medium_pos_v2",
+        "mediumn": "drift_medium_neg_v2",
+        "heavyp": "drift_heavy_pos_v2",
+        "heavyn": "drift_heavy_neg_v2",
+    }
+    effective_reputation_tuning = {
+        "beta_r2": float(
+            args.beta_r2 if args.beta_r2 is not None else getattr(C, "BETA_R2", 0.1)
+        ),
+        "beta_r4": float(
+            args.beta_r4 if args.beta_r4 is not None else getattr(C, "BETA_R4", 8.0)
+        ),
+        "mix_r4_beta": float(
+            args.mix_r4_beta
+            if args.mix_r4_beta is not None
+            else getattr(C, "MIX_R4_BETA", 12.0)
+        ),
+    }
+    C.BETA_R2 = effective_reputation_tuning["beta_r2"]
+    C.BETA_R4 = effective_reputation_tuning["beta_r4"]
+    C.MIX_R4_BETA = effective_reputation_tuning["mix_r4_beta"]
+    if not hasattr(C, "MAL_GRAD_SCALE_MAP") or not isinstance(
+        getattr(C, "MAL_GRAD_SCALE_MAP"), dict
+    ):
+        C.MAL_GRAD_SCALE_MAP = {}
+    effective_attack_tuning = {
+        "stealth_max_amp": float(
+            args.stealth_max_amp
+            if args.stealth_max_amp is not None
+            else getattr(C, "STEALTH_MAX_AMP", 1.0)
+        ),
+        "stealth_amp_step": float(
+            args.stealth_amp_step
+            if args.stealth_amp_step is not None
+            else getattr(C, "STEALTH_AMP_STEP", 0.20)
+        ),
+        "stealth_noise_base": float(
+            args.stealth_noise_base
+            if args.stealth_noise_base is not None
+            else getattr(C, "STEALTH_NOISE_BASE", 0.07)
+        ),
+        "stealth_noise_step": float(
+            args.stealth_noise_step
+            if args.stealth_noise_step is not None
+            else getattr(C, "STEALTH_NOISE_STEP", 0.07)
+        ),
+        "stealth_subspace_ratio": float(
+            args.stealth_subspace_ratio
+            if args.stealth_subspace_ratio is not None
+            else getattr(C, "STEALTH_SUBSPACE_RATIO", 1.0)
+        ),
+        "stealth_bridge_scale": float(
+            args.stealth_bridge_scale
+            if args.stealth_bridge_scale is not None
+            else getattr(C, "STEALTH_BRIDGE_SCALE", 0.0)
+        ),
+        "stealth_anchor_mix": float(
+            args.stealth_anchor_mix
+            if args.stealth_anchor_mix is not None
+            else getattr(C, "STEALTH_ANCHOR_MIX", 0.0)
+        ),
+        "dt_attack_scale_start": float(
+            args.dt_attack_scale_start
+            if args.dt_attack_scale_start is not None
+            else getattr(C, "DT_ATTACK_SCALE_START", 3.0)
+        ),
+        "dt_attack_scale_end": float(
+            args.dt_attack_scale_end
+            if args.dt_attack_scale_end is not None
+            else getattr(C, "DT_ATTACK_SCALE_END", 0.3)
+        ),
+        "dt_attack_scale_step": float(
+            args.dt_attack_scale_step
+            if args.dt_attack_scale_step is not None
+            else getattr(C, "DT_ATTACK_SCALE_STEP", 0.30)
+        ),
+        "label_flip_grad_scale": float(
+            args.label_flip_grad_scale
+            if args.label_flip_grad_scale is not None
+            else getattr(C, "MAL_GRAD_SCALE_MAP", {}).get(
+                "label_flip", getattr(C, "MAL_GRAD_SCALE", 0.5)
+            )
+        ),
+    }
+    C.STEALTH_MAX_AMP = effective_attack_tuning["stealth_max_amp"]
+    C.STEALTH_AMP_STEP = effective_attack_tuning["stealth_amp_step"]
+    C.STEALTH_NOISE_BASE = effective_attack_tuning["stealth_noise_base"]
+    C.STEALTH_NOISE_STEP = effective_attack_tuning["stealth_noise_step"]
+    C.STEALTH_SUBSPACE_RATIO = effective_attack_tuning["stealth_subspace_ratio"]
+    C.STEALTH_BRIDGE_SCALE = effective_attack_tuning["stealth_bridge_scale"]
+    C.STEALTH_ANCHOR_MIX = effective_attack_tuning["stealth_anchor_mix"]
+    C.DT_ATTACK_SCALE_START = effective_attack_tuning["dt_attack_scale_start"]
+    C.DT_ATTACK_SCALE_END = effective_attack_tuning["dt_attack_scale_end"]
+    C.DT_ATTACK_SCALE_STEP = effective_attack_tuning["dt_attack_scale_step"]
 
     if not args.allow_extra_attacks:
         C.BACKDOOR_ATTACK_ENABLED = False
@@ -1868,7 +2511,8 @@ def main():
         if attack == "label_flip":
             C.LABEL_FLIP_RATIO = 0.5
             C.LABEL_FLIP_LR = 0.06
-            C.MAL_GRAD_SCALE_MAP["label_flip"] = 0.5
+            C.MAL_GRAD_SCALE = effective_attack_tuning["label_flip_grad_scale"]
+            C.MAL_GRAD_SCALE_MAP["label_flip"] = effective_attack_tuning["label_flip_grad_scale"]
         else:
             C.LABEL_FLIP_RATIO = float(getattr(C, "LABEL_FLIP_RATIO", 0.5))
             C.LABEL_FLIP_LR = float(getattr(C, "LABEL_FLIP_LR", 0.06))
@@ -1893,6 +2537,8 @@ def main():
                         tau_grid=tau_grid,
                         ref_grid=ref_size_grid,
                         audit_grid=audit_size_grid,
+                        benign_noise_profile=benign_noise_profile,
+                        benign_deploy_noise_profile=benign_deploy_noise_profile,
                     )
                     if exp_group not in exp_groups:
                         continue
@@ -1926,6 +2572,11 @@ def main():
                                                 adaptive_mimic_lambda=float(lam_m),
                                                 ref_size=int(ref_size),
                                                 audit_size=int(audit_size),
+                                                r2_source_override=(
+                                                    None
+                                                    if str(args.r2_source).lower() == "auto"
+                                                    else str(args.r2_source).lower()
+                                                ),
                                                 diag=(
                                                     diag_rows
                                                     if m
@@ -1939,6 +2590,10 @@ def main():
                                                 ),
                                                 round_rows=rounds_rows,
                                                 node_rows=nodes_rows,
+                                                benign_noise_profile=benign_noise_profile,
+                                                benign_noise_alias_map=benign_noise_alias_map,
+                                                benign_deploy_noise_profile=benign_deploy_noise_profile,
+                                                benign_deploy_noise_alias_map=benign_deploy_noise_alias_map,
                                                 meta={
                                                     "attack": attack,
                                                     "level": level,
@@ -1947,6 +2602,8 @@ def main():
                                                     "method": m,
                                                     "seed": seed,
                                                     "exp_group": exp_group,
+                                                    **effective_reputation_tuning,
+                                                    **effective_attack_tuning,
                                                 },
                                             )
                                             metrics.append(overall)
@@ -2079,6 +2736,72 @@ def main():
                                                     "rep_config": str(
                                                         overall.get("rep_config", "")
                                                     ),
+                                                    "benign_noise_profile": str(
+                                                        overall.get("benign_noise_profile", "")
+                                                    ),
+                                                    "benign_noise_active": int(
+                                                        overall.get("benign_noise_active", 0)
+                                                    ),
+                                                    "benign_deploy_noise_profile": str(
+                                                        overall.get(
+                                                            "benign_deploy_noise_profile", ""
+                                                        )
+                                                    ),
+                                                    "benign_deploy_noise_active": int(
+                                                        overall.get(
+                                                            "benign_deploy_noise_active", 0
+                                                        )
+                                                    ),
+                                                    "noise_family": str(
+                                                        overall.get("noise_family", "")
+                                                    ),
+                                                    "beta_r2": float(
+                                                        effective_reputation_tuning["beta_r2"]
+                                                    ),
+                                                    "beta_r4": float(
+                                                        effective_reputation_tuning["beta_r4"]
+                                                    ),
+                                                    "mix_r4_beta": float(
+                                                        effective_reputation_tuning[
+                                                            "mix_r4_beta"
+                                                        ]
+                                                    ),
+                                                    "stealth_max_amp": float(
+                                                        effective_attack_tuning["stealth_max_amp"]
+                                                    ),
+                                                    "stealth_amp_step": float(
+                                                        effective_attack_tuning["stealth_amp_step"]
+                                                    ),
+                                                    "stealth_noise_base": float(
+                                                        effective_attack_tuning["stealth_noise_base"]
+                                                    ),
+                                                    "stealth_noise_step": float(
+                                                        effective_attack_tuning["stealth_noise_step"]
+                                                    ),
+                                                    "dt_attack_scale_start": float(
+                                                        effective_attack_tuning["dt_attack_scale_start"]
+                                                    ),
+                                                    "dt_attack_scale_end": float(
+                                                        effective_attack_tuning["dt_attack_scale_end"]
+                                                    ),
+                                                    "dt_attack_scale_step": float(
+                                                        effective_attack_tuning["dt_attack_scale_step"]
+                                                    ),
+                                                    "label_flip_grad_scale": float(
+                                                        effective_attack_tuning["label_flip_grad_scale"]
+                                                    ),
+                                                    "benign_clean_nodes": int(
+                                                        overall.get("benign_clean_nodes", 0)
+                                                    ),
+                                                    "benign_light_nodes": int(
+                                                        overall.get("benign_light_nodes", 0)
+                                                    ),
+                                                    "benign_medium_nodes": int(
+                                                        overall.get("benign_medium_nodes", 0)
+                                                    ),
+                                                    "benign_heavy_nodes": int(
+                                                        overall.get("benign_heavy_nodes", 0)
+                                                    ),
                                                     "mimic_loss": float(
                                                         overall.get(
                                                             "mimic_loss", float("nan")
@@ -2183,6 +2906,26 @@ def main():
         "uses_dt",
         "method_detail",
         "rep_config",
+        "benign_noise_profile",
+        "benign_noise_active",
+        "benign_deploy_noise_profile",
+        "benign_deploy_noise_active",
+        "noise_family",
+        "beta_r2",
+        "beta_r4",
+        "mix_r4_beta",
+        "stealth_max_amp",
+        "stealth_amp_step",
+        "stealth_noise_base",
+        "stealth_noise_step",
+        "dt_attack_scale_start",
+        "dt_attack_scale_end",
+        "dt_attack_scale_step",
+        "label_flip_grad_scale",
+        "benign_clean_nodes",
+        "benign_light_nodes",
+        "benign_medium_nodes",
+        "benign_heavy_nodes",
         "mimic_loss",
         "poison_loss",
         "final_kl_to_teacher",
@@ -2203,6 +2946,14 @@ def main():
         "audit_size",
         "S_DT",
         "S_DT_ratio",
+        "round_clean_acc",
+        "round_clean_f1",
+        "round_polluted_acc",
+        "round_polluted_f1",
+        "round_benign_rep",
+        "round_malicious_rep",
+        "round_benign_r4",
+        "round_malicious_r4",
         "num_masked",
         "num_valid",
         "valid_ratio",
@@ -2215,6 +2966,23 @@ def main():
         "benign_admitted_weight_mass",
         "uses_dt",
         "method_detail",
+        "rep_config",
+        "benign_noise_profile",
+        "benign_noise_active",
+        "benign_deploy_noise_profile",
+        "benign_deploy_noise_active",
+        "noise_family",
+        "beta_r2",
+        "beta_r4",
+        "mix_r4_beta",
+        "stealth_max_amp",
+        "stealth_amp_step",
+        "stealth_noise_base",
+        "stealth_noise_step",
+        "dt_attack_scale_start",
+        "dt_attack_scale_end",
+        "dt_attack_scale_step",
+        "label_flip_grad_scale",
     ]
     nodes_base_cols = [
         "attack_mode",
@@ -2237,6 +3005,25 @@ def main():
         "rep_config",
         "method_detail",
         "uses_dt",
+        "node_noise_role",
+        "node_noise_spec",
+        "benign_noise_profile",
+        "noise_family",
+        "deploy_noise_role",
+        "deploy_noise_spec",
+        "benign_deploy_noise_profile",
+        "benign_deploy_noise_active",
+        "beta_r2",
+        "beta_r4",
+        "mix_r4_beta",
+        "stealth_max_amp",
+        "stealth_amp_step",
+        "stealth_noise_base",
+        "stealth_noise_step",
+        "dt_attack_scale_start",
+        "dt_attack_scale_end",
+        "dt_attack_scale_step",
+        "label_flip_grad_scale",
         "mimic_attack_enabled",
         "mimic_loss",
         "poison_loss",
@@ -2251,6 +3038,22 @@ def main():
         "mal_nodes",
         "method",
         "rep_config",
+        "benign_noise_profile",
+        "benign_noise_active",
+        "noise_family",
+        "benign_deploy_noise_profile",
+        "benign_deploy_noise_active",
+        "beta_r2",
+        "beta_r4",
+        "mix_r4_beta",
+        "stealth_max_amp",
+        "stealth_amp_step",
+        "stealth_noise_base",
+        "stealth_noise_step",
+        "dt_attack_scale_start",
+        "dt_attack_scale_end",
+        "dt_attack_scale_step",
+        "label_flip_grad_scale",
         "tau_gate",
         "lambda_m",
         "ref_size",
@@ -2299,6 +3102,22 @@ def main():
                 "selected_tau_grid": tau_grid,
                 "selected_ref_size_grid": ref_size_grid,
                 "selected_audit_size_grid": audit_size_grid,
+                "selected_benign_noise_profile": benign_noise_profile,
+                "selected_benign_deploy_noise_profile": benign_deploy_noise_profile,
+                "benign_noise_light_spec": str(args.benign_noise_light_spec),
+                "benign_noise_medium_spec": str(args.benign_noise_medium_spec),
+                "benign_noise_heavy_spec": str(args.benign_noise_heavy_spec),
+                "benign_deploy_noise_light_spec": str(
+                    args.benign_deploy_noise_light_spec
+                ),
+                "benign_deploy_noise_medium_spec": str(
+                    args.benign_deploy_noise_medium_spec
+                ),
+                "benign_deploy_noise_heavy_spec": str(
+                    args.benign_deploy_noise_heavy_spec
+                ),
+                **effective_reputation_tuning,
+                **effective_attack_tuning,
                 "selected_adaptive_mimic_lambdas": adaptive_mimic_lams,
                 "dt_support_min": int(args.dt_support_min),
                 "rounds": int(args.rounds),
@@ -2347,6 +3166,14 @@ def main():
                     "mal_nodes",
                     "method",
                     "rep_config",
+                    "benign_noise_profile",
+                    "benign_noise_active",
+                    "noise_family",
+                    "benign_deploy_noise_profile",
+                    "benign_deploy_noise_active",
+                    "beta_r2",
+                    "beta_r4",
+                    "mix_r4_beta",
                     "tau_gate",
                     "lambda_m",
                     "ref_size",

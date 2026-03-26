@@ -115,7 +115,7 @@ def main():
         "--f-fig3",
         type=int,
         default=5,
-        help="f (malicious clients) for Fig.3 node-score distribution",
+        help="f (malicious clients) for Fig.3 R4/KL separation figure",
     )
     ap.add_argument(
         "--out-dir",
@@ -225,22 +225,134 @@ def main():
             method="weighted",
         )
 
-    # --- Figure 3: node-score distribution ---
+    # --- Figure 3: R4/KL separation ---
     if 3 in figs:
         fig3_f = int(args.f_fig3)
-        fig3 = out_dir / f"Fig3_node_scores_dt{dt}_f{fig3_f}.png"
+        fig3 = out_dir / f"Fig3_R4_distribution_dt{dt}_f{fig3_f}.png"
         fig3_tau_gate = 0.70 if args.tau_gate is None else float(args.tau_gate)
-        plot_node_score_distribution(
-            nodes_df,
-            attack="label_flip",
-            dt_level=dt,
-            mal_nodes=fig3_f,
-            out_path=str(fig3),
-            method="weighted",
-            show_title=True,
-            tau_gate=fig3_tau_gate,
-            show_scatter=True,
+        import matplotlib.pyplot as _plt
+        import numpy as _np
+
+        fig3_df = nodes_df.copy()
+        fig3_df = fig3_df[fig3_df["attack"].astype(str) == "dt_logit_scale"]
+        fig3_df = fig3_df[fig3_df["dt_level"].astype(str) == str(dt)]
+        fig3_df = fig3_df[fig3_df["mal_nodes"].astype(int) == fig3_f]
+        fig3_df = fig3_df[fig3_df["method"].astype(str) == "weighted"]
+
+        def _metric_values(frame: pd.DataFrame, is_mal: int, col: str) -> _np.ndarray:
+            if col not in frame.columns:
+                return _np.asarray([], dtype=float)
+            vals = pd.to_numeric(
+                frame.loc[frame["is_malicious"].astype(int) == int(is_mal), col],
+                errors="coerce",
+            ).dropna()
+            return vals.to_numpy(dtype=float)
+
+        def _draw_violin_panel(
+            ax,
+            benign_vals: _np.ndarray,
+            malicious_vals: _np.ndarray,
+            *,
+            title: str,
+            ylabel: str,
+            gate_y: float | None = None,
+            clamp_unit: bool = False,
+        ) -> None:
+            data = [benign_vals, malicious_vals]
+            positions = [1, 2]
+            colors = ["#4c72b0", "#dd8452"]
+
+            valid_data = [arr for arr in data if arr.size > 0]
+            if valid_data:
+                parts = ax.violinplot(
+                    data,
+                    positions=positions,
+                    widths=0.5,
+                    showmeans=False,
+                    showmedians=False,
+                    showextrema=False,
+                )
+                for body, color in zip(parts["bodies"], colors):
+                    body.set_facecolor(color)
+                    body.set_edgecolor(color)
+                    body.set_alpha(0.28)
+
+            rng = _np.random.default_rng(0)
+            for pos, vals, color in zip(positions, data, colors):
+                if vals.size == 0:
+                    continue
+                xs = pos + rng.normal(0.0, 0.05, size=vals.size)
+                ax.scatter(
+                    xs,
+                    vals,
+                    s=14,
+                    alpha=0.45,
+                    c=color,
+                    edgecolors="none",
+                    zorder=3,
+                )
+                mean_val = float(_np.mean(vals))
+                ax.hlines(mean_val, pos - 0.15, pos + 0.15, colors=color, linewidth=1.6, zorder=4)
+
+            if gate_y is not None:
+                ax.axhline(gate_y, linestyle="--", linewidth=1.1, color="#4d4d4d", zorder=2)
+                ax.text(
+                    0.98,
+                    gate_y + 0.002,
+                    rf"$\tau_{{gate}}={gate_y:.2f}$",
+                    transform=ax.get_yaxis_transform(),
+                    ha="right",
+                    va="bottom",
+                    fontsize=11,
+                    color="#333333",
+                )
+
+            all_vals = _np.concatenate(valid_data) if valid_data else _np.asarray([], dtype=float)
+            if all_vals.size > 0:
+                vmin = float(_np.min(all_vals))
+                vmax = float(_np.max(all_vals))
+                if _np.isfinite(vmin) and _np.isfinite(vmax):
+                    pad = max(0.01, 0.10 * (vmax - vmin if vmax > vmin else 0.05))
+                    ymin = vmin - pad
+                    ymax = vmax + pad
+                    if clamp_unit:
+                        ymin = max(0.0, ymin)
+                        ymax = min(1.0, ymax)
+                    if ymin < ymax:
+                        ax.set_ylim(ymin, ymax)
+
+            ax.set_xticks(positions, ["benign", "malicious"])
+            ax.set_ylabel(ylabel)
+            ax.set_title(title)
+            ax.grid(alpha=0.25, linestyle="--", linewidth=0.8)
+
+        r4_benign = _metric_values(fig3_df, 0, "R4")
+        r4_malicious = _metric_values(fig3_df, 1, "R4")
+        kl_benign = _metric_values(fig3_df, 0, "KL_q_p")
+        kl_malicious = _metric_values(fig3_df, 1, "KL_q_p")
+
+        fig, axes = _plt.subplots(1, 2, figsize=(11.2, 4.1))
+        _draw_violin_panel(
+            axes[0],
+            r4_benign,
+            r4_malicious,
+            title=f"R4 separation (dt_logit_scale, dt={dt}, f={fig3_f})",
+            ylabel="R4 score (higher is better)",
+            gate_y=fig3_tau_gate,
+            clamp_unit=True,
         )
+        _draw_violin_panel(
+            axes[1],
+            kl_benign,
+            kl_malicious,
+            title=f"KL(p_twin || p_i) (dt_logit_scale, dt={dt}, f={fig3_f})",
+            ylabel="KL(p_twin || p_i) (lower is better)",
+            gate_y=None,
+            clamp_unit=False,
+        )
+        fig.tight_layout()
+        fig.savefig(fig3, dpi=220, bbox_inches="tight")
+        _plt.close(fig)
 
     # --- Figure 4: ablation ---
     if 4 in figs:

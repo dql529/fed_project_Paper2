@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import random
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -72,6 +72,26 @@ def apply_noise_to_df(df: pd.DataFrame, spec: dict) -> pd.DataFrame:
     feature_noise_frac = spec.get("feature_noise_frac", 0.0)
     feature_dropout_ratio = spec.get("feature_dropout_ratio", 0.0)
     label_flip_ratio = spec.get("label_flip_ratio", 0.0)
+    bias_std_scale = spec.get("bias_std_scale", 0.0)
+    biased_feature_ratio = spec.get("biased_feature_ratio", 0.0)
+    bias_mode = str(spec.get("bias_mode", "")).strip().lower()
+    bias_sign_override = str(spec.get("bias_sign_override", "")).strip().lower()
+
+    if bias_std_scale > 0 and biased_feature_ratio > 0 and bias_mode == "fixed_signed":
+        std = noisy[feat_cols].std().replace(0, 1e-6)
+        feat_names = list(feat_cols)
+        num_biased = max(1, int(np.ceil(len(feat_names) * float(biased_feature_ratio))))
+        chosen = np.random.choice(
+            feat_names, size=min(num_biased, len(feat_names)), replace=False
+        )
+        if bias_sign_override == "positive":
+            signs = np.ones(len(chosen), dtype=float)
+        elif bias_sign_override == "negative":
+            signs = -np.ones(len(chosen), dtype=float)
+        else:
+            signs = np.random.choice([-1.0, 1.0], size=len(chosen))
+        offsets = signs * float(bias_std_scale) * std.loc[list(chosen)].values
+        noisy.loc[:, list(chosen)] = noisy.loc[:, list(chosen)] + offsets
 
     if feature_noise_frac > 0:
         std = noisy[feat_cols].std().replace(0, 1e-6)
@@ -89,6 +109,66 @@ def apply_noise_to_df(df: pd.DataFrame, spec: dict) -> pd.DataFrame:
 
     noisy.iloc[:, -1] = noisy.iloc[:, -1].astype(int)
     return noisy
+
+
+def _resolve_noise_spec_name(
+    token: str | None,
+    alias_map: Optional[Dict[str, str]] = None,
+) -> str:
+    raw = str(token or "").strip()
+    if raw == "":
+        return "clean"
+    lowered = raw.lower()
+    if lowered in {"clean", "none"}:
+        return "clean"
+    if alias_map is not None and lowered in alias_map:
+        return str(alias_map[lowered]).strip() or "clean"
+    return raw
+
+
+def _lookup_noise_spec(spec_name: str) -> dict:
+    name = str(spec_name).strip()
+    if name.lower() == "clean":
+        return {
+            "name": "clean",
+            "feature_noise_frac": 0.0,
+            "label_flip_ratio": 0.0,
+            "feature_dropout_ratio": 0.0,
+        }
+    for spec in NOISE_VARIANTS:
+        if str(spec.get("name", "")).strip() == name:
+            return spec
+    raise ValueError(
+        f"Unknown benign noise spec '{spec_name}'. "
+        f"Expected one of: {', '.join(str(s.get('name', '')) for s in NOISE_VARIANTS)}"
+    )
+
+
+def _benign_noise_role(spec_name: str, token: str | None = None) -> str:
+    name = str(spec_name or "").strip().lower()
+    raw = str(token or "").strip().lower()
+    if name in {"", "clean", "none"} or raw in {"", "clean", "none"}:
+        return "benign_clean"
+    if raw == "light" or name in {"feat_noise_20", "drift_light"}:
+        return "benign_light"
+    if raw in {"heavy", "heavyp", "heavyn"} or name in {
+        "feat_noise_50_dropout_50",
+        "drift_heavy",
+        "drift_heavy_v2",
+        "drift_heavy_pos_v2",
+        "drift_heavy_neg_v2",
+    }:
+        return "benign_heavy"
+    if raw in {"medium", "mediump", "mediumn"} or name in {
+        "feat_noise_25_dropout_20",
+        "feat_noise_35_dropout_30",
+        "drift_medium",
+        "drift_medium_v2",
+        "drift_medium_pos_v2",
+        "drift_medium_neg_v2",
+    }:
+        return "benign_medium"
+    return "benign_clean"
 
 
 def build_noise_variants_fixed(base_csv_path: str, dataset_seed: int = 123):
@@ -191,6 +271,10 @@ def load_node_splits(
     attack_mode: str | None = None,
     label_flip_ratio: float = 0.0,
     pre_split_poison: bool = False,
+    benign_noise_profile: Optional[Sequence[str]] = None,
+    benign_noise_alias_map: Optional[Dict[str, str]] = None,
+    benign_deploy_noise_profile: Optional[Sequence[str]] = None,
+    benign_deploy_noise_alias_map: Optional[Dict[str, str]] = None,
 ):
     """
     æ¯ä¸ª seed ä¼éæ°ååèç¹æ°æ®æ± ï¼ç¨äºéå¤å®éªï¼ã?
@@ -203,15 +287,52 @@ def load_node_splits(
     split_size = len(df) // num_nodes
 
     node_data_objects = []
+    benign_profile = [str(x).strip() for x in (benign_noise_profile or [])]
+    benign_deploy_profile = [
+        str(x).strip() for x in (benign_deploy_noise_profile or [])
+    ]
+    benign_idx = 0
     for i in range(num_nodes):
         start = i * split_size
         end = None if i == num_nodes - 1 else (i + 1) * split_size
         node_idx = indices[start:end]
         node_df = df.iloc[node_idx]
+        is_malicious = i < malicious_nodes
+
+        if is_malicious:
+            noise_token = "malicious"
+            noise_spec_name = str(attack_mode or "malicious")
+            noise_role = "malicious"
+        else:
+            noise_token = (
+                benign_profile[benign_idx] if benign_idx < len(benign_profile) else "clean"
+            )
+            noise_spec_name = _resolve_noise_spec_name(
+                noise_token,
+                alias_map=benign_noise_alias_map,
+            )
+            noise_role = _benign_noise_role(noise_spec_name, noise_token)
+            deploy_noise_token = (
+                benign_deploy_profile[benign_idx]
+                if benign_idx < len(benign_deploy_profile)
+                else "clean"
+            )
+            deploy_noise_spec_name = _resolve_noise_spec_name(
+                deploy_noise_token,
+                alias_map=benign_deploy_noise_alias_map,
+            )
+            deploy_noise_role = _benign_noise_role(
+                deploy_noise_spec_name, deploy_noise_token
+            )
+            benign_idx += 1
+        if is_malicious:
+            deploy_noise_token = "malicious"
+            deploy_noise_spec_name = str(attack_mode or "malicious")
+            deploy_noise_role = "malicious"
 
         if (
             pre_split_poison
-            and i < malicious_nodes
+            and is_malicious
             and attack_mode == "label_flip"
             and label_flip_ratio > 0
         ):
@@ -223,6 +344,20 @@ def load_node_splits(
         train_node_df, test_node_df = train_test_split(
             node_df, test_size=0.2, random_state=seed
         )
+
+        if (not is_malicious) and noise_spec_name.lower() not in {"", "clean", "none"}:
+            train_node_df = apply_noise_to_df(
+                train_node_df,
+                _lookup_noise_spec(noise_spec_name),
+            )
+        if (
+            (not is_malicious)
+            and deploy_noise_spec_name.lower() not in {"", "clean", "none"}
+        ):
+            test_node_df = apply_noise_to_df(
+                test_node_df,
+                _lookup_noise_spec(deploy_noise_spec_name),
+            )
 
         train_x = torch.tensor(
             train_node_df.iloc[:, :-1].values, dtype=torch.float32, device=device
@@ -238,7 +373,16 @@ def load_node_splits(
         )
 
         node_data_objects.append(
-            {"train": SimpleData(train_x, train_y), "test": SimpleData(test_x, test_y)}
+            {
+                "train": SimpleData(train_x, train_y),
+                "test": SimpleData(test_x, test_y),
+                "noise_role": noise_role,
+                "noise_spec": noise_spec_name,
+                "noise_token": noise_token,
+                "deploy_noise_role": deploy_noise_role,
+                "deploy_noise_spec": deploy_noise_spec_name,
+                "deploy_noise_token": deploy_noise_token,
+            }
         )
 
     return node_data_objects, df

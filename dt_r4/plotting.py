@@ -319,6 +319,10 @@ def _metric_display_name(metric: str) -> str:
         "clean_acc": "clean ACC",
         "polluted_f1": "polluted F1",
         "polluted_acc": "polluted ACC",
+        "round_clean_f1": "round clean F1",
+        "round_clean_acc": "round clean ACC",
+        "round_polluted_f1": "round deploy F1",
+        "round_polluted_acc": "round deploy ACC",
         "w_mal": "W_mal",
         "benign_fp": "benign false positive rate",
         "benign_pass_rate": "benign false positive rate",
@@ -425,6 +429,184 @@ def plot_clean_holdout_vs_f(
 
     fig.tight_layout()
     plt.savefig(out_path, dpi=200)
+    plt.close(fig)
+    return Path(out_path)
+
+
+def plot_acc_summary_vs_f(
+    summary_df: pd.DataFrame,
+    *,
+    attacks: Sequence[str],
+    methods: Sequence[str],
+    dt_level: str,
+    mal_nodes: Sequence[int],
+    out_path: str | Path,
+    top_metric: str = "clean_acc",
+    bottom_metric: str = "polluted_acc",
+    label_flip_level: str = "L1",
+) -> Path:
+    _ensure_parent(out_path)
+    df = summary_df.copy()
+    if df.empty:
+        return Path(out_path)
+    df = df[df["dt_level"].astype(str) == str(dt_level)]
+    fig, axes = plt.subplots(2, len(attacks), figsize=(5.2 * len(attacks), 7.2), sharey="row")
+    if len(attacks) == 1:
+        axes = np.asarray(axes).reshape(2, 1)
+
+    for row_idx, metric in enumerate([top_metric, bottom_metric]):
+        mean_col, _, mode = _metric_columns(df, metric)
+        if mode == "missing":
+            raise ValueError(f"Metric '{metric}' not found in summary")
+        for col_idx, attack in enumerate(attacks):
+            ax = axes[row_idx, col_idx]
+            for method in methods:
+                sub = df[(df["attack"] == attack) & (df["method"] == method)]
+                if attack == "label_flip":
+                    sub = sub[sub.get("level", "") == label_flip_level]
+
+                xs = []
+                ys = []
+                cis = []
+                for f_value in mal_nodes:
+                    row = sub[sub["mal_nodes"] == int(f_value)]
+                    if row.empty:
+                        continue
+                    if f"{metric}_m" in row.columns:
+                        mean = float(pd.to_numeric(row[f"{metric}_m"].iloc[0], errors="coerce"))
+                        std = float(
+                            pd.to_numeric(row[f"{metric}_s"].iloc[0], errors="coerce")
+                            if f"{metric}_s" in row.columns
+                            else np.nan
+                        )
+                        count = (
+                            int(row.get("count", pd.Series([1])).iloc[0])
+                            if "count" in row.columns
+                            else 0
+                        )
+                        ci = (
+                            1.96 * std / np.sqrt(max(1, count))
+                            if np.isfinite(std) and count > 0
+                            else 0.0
+                        )
+                    else:
+                        mean, ci = _mean_ci95(row[mean_col])
+                    if np.isfinite(mean):
+                        xs.append(int(f_value))
+                        ys.append(mean)
+                        cis.append(ci if np.isfinite(ci) else 0.0)
+
+                if not xs:
+                    continue
+                line = ax.errorbar(
+                    xs,
+                    ys,
+                    yerr=cis,
+                    marker="o",
+                    linewidth=1.5,
+                    capsize=3,
+                    label=str(method),
+                )
+                _ci_fill(ax, xs, np.asarray(ys), np.asarray(cis), color=line[0].get_color())
+
+            ax.set_title(f"{attack}")
+            ax.set_xlabel("malicious clients")
+            ax.set_ylim(0.0, 1.0)
+            ax.grid(alpha=0.2)
+            if row_idx == 0:
+                ax.legend(fontsize=8)
+
+    axes[0, 0].set_ylabel(_metric_display_name(top_metric))
+    axes[1, 0].set_ylabel(_metric_display_name(bottom_metric))
+    fig.tight_layout()
+    plt.savefig(out_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+    return Path(out_path)
+
+
+def plot_metric_vs_round_grid(
+    rounds_df: pd.DataFrame,
+    *,
+    dt_level: str,
+    attack: str,
+    mal_nodes: Sequence[int],
+    methods: Sequence[str],
+    metric: str,
+    out_path: str | Path,
+    label_flip_level: str = "L1",
+    ncols: int = 3,
+    figsize: Tuple[float, float] = (12.6, 7.2),
+) -> Path:
+    _ensure_parent(out_path)
+    df = rounds_df.copy()
+    if df.empty or metric not in df.columns:
+        return Path(out_path)
+
+    df = df[df["dt_level"].astype(str) == str(dt_level)]
+    df = df[df["attack"].astype(str) == str(attack)]
+    df = df[df["method"].astype(str).isin(list(methods))]
+    if attack == "label_flip" and "level" in df.columns:
+        df = df[df["level"] == label_flip_level]
+    if df.empty:
+        return Path(out_path)
+
+    panel_fs = [int(x) for x in mal_nodes]
+    n_panels = len(panel_fs)
+    ncols_eff = max(1, min(int(ncols), n_panels))
+    nrows = int(np.ceil(n_panels / ncols_eff))
+    fig, axes = plt.subplots(nrows, ncols_eff, figsize=figsize, sharex=True, sharey=True)
+    axes_arr = np.atleast_1d(axes).reshape(nrows, ncols_eff)
+
+    for idx, f_value in enumerate(panel_fs):
+        ax = axes_arr[idx // ncols_eff, idx % ncols_eff]
+        sub = df[df["mal_nodes"].astype(int) == int(f_value)]
+        for method in methods:
+            by_round = (
+                sub[sub["method"].astype(str) == str(method)]
+                .groupby("round")[metric]
+                .agg(["mean", "std", "count"])
+            )
+            if by_round.empty:
+                continue
+            rounds = by_round.index.to_numpy(dtype=float)
+            mean = by_round["mean"].to_numpy(dtype=float)
+            count = by_round["count"].to_numpy(dtype=int)
+            std = by_round["std"].to_numpy(dtype=float)
+            ci = 1.96 * np.divide(std, np.sqrt(count), out=np.zeros_like(std), where=count > 0)
+            line = ax.plot(
+                rounds,
+                mean,
+                marker="o",
+                linewidth=1.5,
+                markersize=4.5,
+                label=str(method),
+            )
+            _ci_fill(ax, rounds, mean, ci, color=line[0].get_color())
+        ax.set_title(f"f={f_value}")
+        ax.set_ylim(0.0, 1.0)
+        ax.grid(alpha=0.2)
+        if idx % ncols_eff == 0:
+            ax.set_ylabel(_metric_display_name(metric))
+        if idx // ncols_eff == nrows - 1:
+            ax.set_xlabel("Round")
+
+    for idx in range(n_panels, nrows * ncols_eff):
+        axes_arr[idx // ncols_eff, idx % ncols_eff].axis("off")
+
+    handles, labels = axes_arr[0, 0].get_legend_handles_labels()
+    if handles:
+        fig.legend(
+            handles,
+            labels,
+            loc="upper center",
+            ncol=min(len(labels), 4),
+            bbox_to_anchor=(0.5, 1.01),
+            frameon=False,
+            fontsize=8,
+        )
+    fig.suptitle(f"{_metric_display_name(metric)} vs round under {attack}", y=1.04)
+    fig.tight_layout()
+    plt.savefig(out_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
     return Path(out_path)
 
@@ -1952,9 +2134,11 @@ __all__ = [
     "parse_csv_list",
     "validate_plot_inputs",
     "plot_ablation_multiattack",
+    "plot_acc_summary_vs_f",
     "plot_clean_holdout_vs_f",
     "plot_cleanf1_vs_tau",
     "plot_fp_benign_vs_tau",
+    "plot_metric_vs_round_grid",
     "plot_wmal_vs_tau",
     "plot_sdt_vs_round",
     "plot_fallback_prob_table",

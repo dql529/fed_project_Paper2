@@ -1,6 +1,25 @@
 # IDE / cache
 /.vscode/
 __pycache__/
+**/__pycache__/
+*.py[cod]
+*.DS_Store
+
+# generated experiment outputs / export bundles
+/artifacts/
+/paper_upload_package/
+
+# minimal reproducible dataset / teacher assets
+/UAV9-main/*
+!/UAV9-main/UAVCAN/
+/UAV9-main/UAVCAN/*
+!/UAV9-main/UAVCAN/large_model.pt
+!/UAV9-main/UAVCAN/train_large_model.py
+!/UAV9-main/UAVCAN/split_data/
+/UAV9-main/UAVCAN/split_data/*
+!/UAV9-main/UAVCAN/split_data/type10_student_pool.csv
+!/UAV9-main/UAVCAN/split_data/type10_global_test.csv
+!/UAV9-main/UAVCAN/split_data/type10_teacher.csv
 
 # old root-level outputs
 /plot_test_out/

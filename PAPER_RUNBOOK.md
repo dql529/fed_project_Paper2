@@ -2,6 +2,26 @@
 
 This runbook records the paper-facing experiment definitions and the exact commands used to regenerate the final figures and tables.
 
+## Environment Setup
+
+```bat
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+Tracked runtime assets required by the main experiments:
+
+- `UAV9-main/UAVCAN/large_model.pt`
+- `UAV9-main/UAVCAN/split_data/type10_student_pool.csv`
+- `UAV9-main/UAVCAN/split_data/type10_global_test.csv`
+
+Optional teacher retraining asset:
+
+- `UAV9-main/UAVCAN/split_data/type10_teacher.csv`
+
+Generated outputs under `artifacts/` and `paper_upload_package/` are intentionally not tracked; rerunning the commands below will recreate them.
+
 ## Today Locked
 
 - Main method: `weighted = R2 + R4`

@@ -44,6 +44,15 @@ TARGET_NOISESET_NAMES = [
     "feat_noise_25_dropout_20",
     "feat_noise_35_dropout_30",
     "feat_noise_50_dropout_50",
+    "drift_light",
+    "drift_medium",
+    "drift_heavy",
+    "drift_medium_v2",
+    "drift_heavy_v2",
+    "drift_medium_pos_v2",
+    "drift_medium_neg_v2",
+    "drift_heavy_pos_v2",
+    "drift_heavy_neg_v2",
 ]
 NOISE_VARIANTS = [
     {
@@ -75,6 +84,91 @@ NOISE_VARIANTS = [
         "feature_noise_frac": 0.50,
         "label_flip_ratio": 0.0,
         "feature_dropout_ratio": 0.50,
+    },
+    {
+        "name": "drift_light",
+        "feature_noise_frac": 0.10,
+        "label_flip_ratio": 0.0,
+        "feature_dropout_ratio": 0.05,
+        "bias_std_scale": 0.15,
+        "biased_feature_ratio": 0.15,
+        "bias_mode": "fixed_signed",
+    },
+    {
+        "name": "drift_medium",
+        "feature_noise_frac": 0.20,
+        "label_flip_ratio": 0.0,
+        "feature_dropout_ratio": 0.15,
+        "bias_std_scale": 0.30,
+        "biased_feature_ratio": 0.25,
+        "bias_mode": "fixed_signed",
+    },
+    {
+        "name": "drift_heavy",
+        "feature_noise_frac": 0.25,
+        "label_flip_ratio": 0.0,
+        "feature_dropout_ratio": 0.25,
+        "bias_std_scale": 0.45,
+        "biased_feature_ratio": 0.35,
+        "bias_mode": "fixed_signed",
+    },
+    {
+        "name": "drift_medium_v2",
+        "feature_noise_frac": 0.25,
+        "label_flip_ratio": 0.0,
+        "feature_dropout_ratio": 0.20,
+        "bias_std_scale": 0.45,
+        "biased_feature_ratio": 0.35,
+        "bias_mode": "fixed_signed",
+    },
+    {
+        "name": "drift_heavy_v2",
+        "feature_noise_frac": 0.35,
+        "label_flip_ratio": 0.0,
+        "feature_dropout_ratio": 0.35,
+        "bias_std_scale": 0.70,
+        "biased_feature_ratio": 0.55,
+        "bias_mode": "fixed_signed",
+    },
+    {
+        "name": "drift_medium_pos_v2",
+        "feature_noise_frac": 0.25,
+        "label_flip_ratio": 0.0,
+        "feature_dropout_ratio": 0.20,
+        "bias_std_scale": 0.45,
+        "biased_feature_ratio": 0.35,
+        "bias_mode": "fixed_signed",
+        "bias_sign_override": "positive",
+    },
+    {
+        "name": "drift_medium_neg_v2",
+        "feature_noise_frac": 0.25,
+        "label_flip_ratio": 0.0,
+        "feature_dropout_ratio": 0.20,
+        "bias_std_scale": 0.45,
+        "biased_feature_ratio": 0.35,
+        "bias_mode": "fixed_signed",
+        "bias_sign_override": "negative",
+    },
+    {
+        "name": "drift_heavy_pos_v2",
+        "feature_noise_frac": 0.35,
+        "label_flip_ratio": 0.0,
+        "feature_dropout_ratio": 0.35,
+        "bias_std_scale": 0.70,
+        "biased_feature_ratio": 0.55,
+        "bias_mode": "fixed_signed",
+        "bias_sign_override": "positive",
+    },
+    {
+        "name": "drift_heavy_neg_v2",
+        "feature_noise_frac": 0.35,
+        "label_flip_ratio": 0.0,
+        "feature_dropout_ratio": 0.35,
+        "bias_std_scale": 0.70,
+        "biased_feature_ratio": 0.55,
+        "bias_mode": "fixed_signed",
+        "bias_sign_override": "negative",
     },
 ]
 
@@ -149,7 +243,7 @@ R4_WARMUP_ALPHA = 1.0
 # 攻击
 # ---------------------------------------------------------------------------
 MAL_ATTACK_MODE = (
-    "label_flip"  # "none" | "stealth_amp" | "dt_logit_scale" | "label_flip"
+    "label_flip"  # "none" | "stealth_amp" | "stealth_coord_subspace" | "dt_logit_scale" | "label_flip"
 )
 
 # label flip
@@ -189,6 +283,9 @@ STEALTH_MAX_AMP = 1.0
 STEALTH_AMP_STEP = 0.20
 STEALTH_NOISE_BASE = 0.07
 STEALTH_NOISE_STEP = 0.07
+STEALTH_SUBSPACE_RATIO = 1.0
+STEALTH_BRIDGE_SCALE = 0.0
+STEALTH_ANCHOR_MIX = 0.0
 
 # backdoor trigger
 BACKDOOR_ATTACK_ENABLED = False

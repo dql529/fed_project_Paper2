@@ -130,6 +130,9 @@ class DroneNode:
         amp_step: Optional[float] = None,
         noise_base: Optional[float] = None,
         noise_step: Optional[float] = None,
+        subspace_ratio: Optional[float] = None,
+        bridge_scale: Optional[float] = None,
+        anchor_mix: Optional[float] = None,
         label_flip_ratio: Optional[float] = None,
         label_flip_warmup: Optional[int] = None,
         label_flip_epochs: Optional[int] = None,
@@ -181,6 +184,21 @@ class DroneNode:
             noise_step
             if noise_step is not None
             else getattr(C, "STEALTH_NOISE_STEP", 0.0)
+        )
+        self.subspace_ratio = float(
+            subspace_ratio
+            if subspace_ratio is not None
+            else getattr(C, "STEALTH_SUBSPACE_RATIO", 1.0)
+        )
+        self.bridge_scale = float(
+            bridge_scale
+            if bridge_scale is not None
+            else getattr(C, "STEALTH_BRIDGE_SCALE", 0.0)
+        )
+        self.anchor_mix = float(
+            anchor_mix
+            if anchor_mix is not None
+            else getattr(C, "STEALTH_ANCHOR_MIX", 0.0)
         )
         self.ref_model_for_attack: Optional[StudentNet] = None
         self.label_flip_ratio = float(
@@ -440,6 +458,9 @@ class DroneNode:
         if self.attack_mode == "stealth_amp":
             self._apply_stealth_amp_attack()
             return
+        if self.attack_mode == "stealth_coord_subspace":
+            self._apply_stealth_coord_subspace_attack()
+            return
 
         raise ValueError(f"Unknown MAL_ATTACK_MODE={self.attack_mode}")
 
@@ -517,6 +538,9 @@ class DroneNode:
         step = self.round_idx - self.warmup_rounds
         amp = min(self.max_amp, step * self.amp_step)
         noise_std = self.noise_base + step * self.noise_step
+        subspace_ratio = float(min(1.0, max(0.0, self.subspace_ratio)))
+        bridge_scale = float(max(0.0, self.bridge_scale))
+        anchor_mix = float(min(1.0, max(0.0, self.anchor_mix)))
 
         ref_sd = self.ref_model_for_attack.state_dict()
         with torch.no_grad():
@@ -524,15 +548,90 @@ class DroneNode:
                 if name in ref_sd and torch.is_floating_point(p):
                     ref = ref_sd[name].to(p.device).data
                     delta = p.data - ref
-                    p.add_(amp * delta)
+                    base = ref + (1.0 - anchor_mix) * delta if anchor_mix > 0 else p.data
+                    updated = base.clone()
+                    flat = delta.abs().reshape(-1)
+                    if flat.numel() == 0:
+                        continue
+                    if subspace_ratio >= 1.0:
+                        mask = torch.ones_like(delta, dtype=torch.bool)
+                    else:
+                        topk = max(1, int(round(subspace_ratio * flat.numel())))
+                        mask_flat = torch.zeros_like(flat, dtype=torch.bool)
+                        mask_flat[torch.topk(flat, topk).indices] = True
+                        mask = mask_flat.reshape_as(delta)
+                    mean_abs = delta.abs().mean()
+                    shared_sign = 1.0 if (sum(ord(ch) for ch in name) % 2 == 0) else -1.0
+                    attack_shift = amp * delta
+                    if bridge_scale > 0.0 and torch.isfinite(mean_abs):
+                        attack_shift = attack_shift + (
+                            shared_sign * bridge_scale * mean_abs
+                        )
+                    updated[mask] = updated[mask] + attack_shift[mask]
                     if noise_std > 0:
-                        p.add_(torch.randn_like(p) * noise_std)
+                        noise = torch.randn_like(p) * noise_std
+                        if subspace_ratio < 1.0 or bridge_scale > 0.0 or anchor_mix > 0.0:
+                            updated[mask] = updated[mask] + noise[mask]
+                        else:
+                            updated = updated + noise
+                    p.copy_(updated)
 
         if getattr(C, "PRINT_DEBUG", False) and self.round_idx in getattr(
             C, "DEBUG_ROUNDS", set()
         ):
             print(
-                f"[Malicious {self.drone_id}] stealth_amp: round={self.round_idx}, amp={amp:.4f}, noise={noise_std:.4f}"
+                f"[Malicious {self.drone_id}] stealth_amp: round={self.round_idx}, amp={amp:.4f}, noise={noise_std:.4f}, subspace={subspace_ratio:.3f}, bridge={bridge_scale:.4f}, anchor={anchor_mix:.3f}"
+            )
+
+    def _apply_stealth_coord_subspace_attack(self):
+        if self.round_idx <= self.warmup_rounds:
+            return
+        if self.ref_model_for_attack is None or self.local_model is None:
+            return
+
+        step = self.round_idx - self.warmup_rounds
+        amp = min(self.max_amp, step * self.amp_step)
+        noise_std = self.noise_base + step * self.noise_step
+        subspace_ratio = float(min(1.0, max(0.0, self.subspace_ratio)))
+        bridge_scale = float(max(0.0, self.bridge_scale))
+        anchor_mix = float(min(1.0, max(0.0, self.anchor_mix)))
+
+        ref_sd = self.ref_model_for_attack.state_dict()
+        with torch.no_grad():
+            for name, p in self.local_model.named_parameters():
+                if name not in ref_sd or not torch.is_floating_point(p):
+                    continue
+                ref = ref_sd[name].to(p.device).data
+                delta = p.data - ref
+                flat_n = delta.numel()
+                if flat_n == 0:
+                    continue
+                ratio = subspace_ratio if subspace_ratio > 0 else 0.1
+                topk = max(1, int(round(ratio * flat_n)))
+                mask_flat = torch.zeros(flat_n, dtype=torch.bool, device=p.device)
+                seed = sum(ord(ch) for ch in name) + 997 * int(self.round_idx)
+                g = torch.Generator(device=p.device)
+                g.manual_seed(int(seed))
+                perm = torch.randperm(flat_n, generator=g, device=p.device)
+                mask_flat[perm[:topk]] = True
+                mask = mask_flat.reshape_as(delta)
+                shared_sign = 1.0 if (sum(ord(ch) for ch in name) % 2 == 0) else -1.0
+                mean_abs = delta.abs().mean()
+                base = ref + (1.0 - anchor_mix) * delta
+                updated = base.clone()
+                coord_shift = shared_sign * (amp + bridge_scale) * mean_abs
+                retained_delta = 0.25 * delta
+                updated[mask] = updated[mask] + coord_shift + retained_delta[mask]
+                if noise_std > 0:
+                    noise = torch.randn_like(p) * noise_std
+                    updated[mask] = updated[mask] + noise[mask]
+                p.copy_(updated)
+
+        if getattr(C, "PRINT_DEBUG", False) and self.round_idx in getattr(
+            C, "DEBUG_ROUNDS", set()
+        ):
+            print(
+                f"[Malicious {self.drone_id}] stealth_coord_subspace: round={self.round_idx}, amp={amp:.4f}, noise={noise_std:.4f}, subspace={subspace_ratio:.3f}, bridge={bridge_scale:.4f}, anchor={anchor_mix:.3f}"
             )
 
 
